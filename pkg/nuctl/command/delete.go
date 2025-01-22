@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 type deleteCommandeer struct {
 	cmd            *cobra.Command
 	rootCommandeer *RootCommandeer
+	forceDelete    bool
 }
 
 func newDeleteCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *deleteCommandeer {
@@ -42,6 +43,8 @@ func newDeleteCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 		Aliases: []string{"del"},
 		Short:   "Delete resources",
 	}
+
+	cmd.PersistentFlags().BoolVarP(&commandeer.forceDelete, "force", "f", false, "Force delete resources")
 
 	deleteFunctionCommand := newDeleteFunctionCommandeer(ctx, commandeer).cmd
 	deleteProjectCommand := newDeleteProjectCommandeer(ctx, commandeer).cmd
@@ -62,7 +65,8 @@ func newDeleteCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 
 type deleteFunctionCommandeer struct {
 	*deleteCommandeer
-	functionConfig functionconfig.Config
+	functionConfig  functionconfig.Config
+	withAPIGateways bool
 }
 
 func newDeleteFunctionCommandeer(ctx context.Context, deleteCommandeer *deleteCommandeer) *deleteFunctionCommandeer {
@@ -83,19 +87,25 @@ func newDeleteFunctionCommandeer(ctx context.Context, deleteCommandeer *deleteCo
 			}
 
 			// initialize root
-			if err := deleteCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := deleteCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
 			commandeer.functionConfig.Meta.Name = args[0]
 			commandeer.functionConfig.Meta.Namespace = deleteCommandeer.rootCommandeer.namespace
 
-			return deleteCommandeer.rootCommandeer.platform.DeleteFunction(ctx, &platform.DeleteFunctionOptions{
-				FunctionConfig: commandeer.functionConfig,
-			})
+			deleteFunctionOptions := &platform.DeleteFunctionOptions{
+				FunctionConfig:    commandeer.functionConfig,
+				DeleteApiGateways: commandeer.withAPIGateways,
+			}
+			if deleteCommandeer.forceDelete {
+				deleteFunctionOptions.IgnoreFunctionStateValidation = true
+			}
+
+			return deleteCommandeer.rootCommandeer.platform.DeleteFunction(ctx, deleteFunctionOptions)
 		},
 	}
-
+	cmd.Flags().BoolVar(&commandeer.withAPIGateways, "with-api-gateways", false, "Whether function should be removed with its api gateways (default: false)")
 	commandeer.cmd = cmd
 
 	return commandeer
@@ -126,16 +136,21 @@ func newDeleteProjectCommandeer(ctx context.Context, deleteCommandeer *deleteCom
 			}
 
 			// initialize root
-			if err := deleteCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := deleteCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
 			commandeer.projectMeta.Name = args[0]
 			commandeer.projectMeta.Namespace = deleteCommandeer.rootCommandeer.namespace
 
+			deletionStrategy := platform.ResolveProjectDeletionStrategyOrDefault(commandeer.deletionStrategy)
+			if commandeer.forceDelete {
+				deletionStrategy = platform.DeleteProjectStrategyCascading
+			}
+
 			return deleteCommandeer.rootCommandeer.platform.DeleteProject(ctx, &platform.DeleteProjectOptions{
 				Meta:     commandeer.projectMeta,
-				Strategy: platform.ResolveProjectDeletionStrategyOrDefault(commandeer.deletionStrategy),
+				Strategy: deletionStrategy,
 
 				// wait until all project related resources would be removed
 				WaitForResourcesDeletionCompletion:         commandeer.wait,
@@ -174,7 +189,7 @@ func newDeleteAPIGatewayCommandeer(ctx context.Context, deleteCommandeer *delete
 			}
 
 			// initialize root
-			if err := deleteCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := deleteCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -214,7 +229,7 @@ func newDeleteFunctionEventCommandeer(ctx context.Context, deleteCommandeer *del
 			}
 
 			// initialize root
-			if err := deleteCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := deleteCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ import (
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -67,6 +66,7 @@ type CreateFunctionOptions struct {
 	DependantImagesRegistryURL string
 	PermissionOptions          opa.PermissionOptions
 	AuthSession                auth.Session
+	AutofixConfiguration       bool
 }
 
 type UpdateFunctionOptions struct {
@@ -86,6 +86,20 @@ type DeleteFunctionOptions struct {
 
 	// whether to ignore the validation where functions being provisioned cannot be deleted
 	IgnoreFunctionStateValidation bool
+
+	// whether api gateways should be deleted if ones exist
+	DeleteApiGateways bool
+}
+
+type RedeployFunctionOptions struct {
+	FunctionMeta                *functionconfig.Meta
+	FunctionSpec                *functionconfig.Spec
+	AuthConfig                  *AuthConfig
+	DependantImagesRegistryURL  string
+	AuthSession                 auth.Session
+	PermissionOptions           opa.PermissionOptions
+	CreationStateUpdatedTimeout time.Duration
+	DesiredState                functionconfig.FunctionState
 }
 
 // CreateFunctionBuildResult holds information detected/generated as a result of a build process
@@ -139,6 +153,9 @@ type CreateFunctionInvocationOptions struct {
 	// used from nuctl, to avoid validating the input url, which might be overridden when
 	// user provides explicit external ip address
 	SkipURLValidation bool
+
+	// skip tls verification when invoking a function
+	SkipTLSVerification bool
 }
 
 func (c *CreateFunctionInvocationOptions) EnrichFunction(ctx context.Context, p Platform) error {
@@ -208,12 +225,25 @@ func (pm ProjectMeta) IsEqual(other ProjectMeta) bool {
 }
 
 type ProjectSpec struct {
-	Description string `json:"description,omitempty"`
-	Owner       string `json:"owner,omitempty"`
+	Description                 string            `json:"description,omitempty"`
+	Owner                       string            `json:"owner,omitempty"`
+	DefaultFunctionNodeSelector map[string]string `json:"defaultFunctionNodeSelector,omitempty"`
 }
 
 func (ps ProjectSpec) IsEqual(other ProjectSpec) bool {
-	return ps == other
+
+	if ps.DefaultFunctionNodeSelector == nil && other.DefaultFunctionNodeSelector != nil ||
+		ps.DefaultFunctionNodeSelector != nil && other.DefaultFunctionNodeSelector == nil {
+		return false
+	}
+
+	for k, v := range other.DefaultFunctionNodeSelector {
+		value, ok := ps.DefaultFunctionNodeSelector[k]
+		if !ok || value != v {
+			return false
+		}
+	}
+	return ps.Description == other.Description && ps.Owner == other.Owner
 }
 
 type ProjectStatus struct {
@@ -431,6 +461,7 @@ type NuclioFunctionAPIGatewaySpec struct {
 type APIGatewayUpstreamSpec struct {
 	Kind             APIGatewayUpstreamKind        `json:"kind,omitempty"`
 	NuclioFunction   *NuclioFunctionAPIGatewaySpec `json:"nucliofunction,omitempty"`
+	Port             int                           `json:"port,omitempty"`
 	Percentage       int                           `json:"percentage,omitempty"`
 	RewriteTarget    string                        `json:"rewriteTarget,omitempty"`
 	ExtraAnnotations map[string]string             `json:"extraAnnotations,omitempty"`
@@ -451,6 +482,13 @@ type APIGatewayConfig struct {
 	Meta   APIGatewayMeta   `json:"metadata,omitempty"`
 	Spec   APIGatewaySpec   `json:"spec,omitempty"`
 	Status APIGatewayStatus `json:"status,omitempty"`
+}
+
+func GetAPIGatewayConfigFromInterface(apiGatewayConfigInterface interface{}) *APIGatewayConfig {
+	if apiGatewayConfig, ok := apiGatewayConfigInterface.(*APIGatewayConfig); ok {
+		return apiGatewayConfig
+	}
+	return nil
 }
 
 // APIGatewayState is state of api gateway
@@ -489,13 +527,14 @@ type DeleteAPIGatewayOptions struct {
 }
 
 type GetAPIGatewaysOptions struct {
-	Name        string
-	Namespace   string
-	Labels      string
-	AuthSession auth.Session
+	Name         string
+	Namespace    string
+	Labels       string
+	FunctionName string
+	AuthSession  auth.Session
 }
 
-// to appease k8s
+// DeepCopyInto to appease k8s
 func (s *APIGatewaySpec) DeepCopyInto(out *APIGatewaySpec) {
 
 	// TODO: proper deep copy
@@ -518,9 +557,11 @@ type GetFunctionReplicaLogsStreamOptions struct {
 
 	// Number of lines to show from the end of the logs
 	TailLines *int64
-}
 
-type FunctionSecret struct {
-	Kubernetes *v1.Secret
-	Local      *string
+	// A specific container name to stream logs from (if not specified, the "nuclio" container in the pod is used)
+	// Relevant only for pods with multiple containers
+	ContainerName string
+
+	// Permission options for the log stream
+	PermissionOptions opa.PermissionOptions
 }

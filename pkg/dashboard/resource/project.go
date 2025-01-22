@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import (
 	"sync"
 
 	"github.com/nuclio/nuclio/pkg/common"
-	nucliocontext "github.com/nuclio/nuclio/pkg/context"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/dashboard"
 	"github.com/nuclio/nuclio/pkg/opa"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -81,7 +81,7 @@ func (pr *projectResource) GetAll(request *http.Request) (map[string]restful.Att
 	requestOrigin, sessionCookie := pr.getRequestOriginAndSessionCookie(request)
 	projects, err := pr.getPlatform().GetProjects(ctx, &platform.GetProjectsOptions{
 		Meta: platform.ProjectMeta{
-			Name:      request.Header.Get("x-nuclio-project-name"),
+			Name:      request.Header.Get(headers.ProjectName),
 			Namespace: namespace,
 		},
 		PermissionOptions: opa.PermissionOptions{
@@ -163,7 +163,7 @@ func (pr *projectResource) Create(request *http.Request) (id string, attributes 
 
 // Update a project
 func (pr *projectResource) Update(request *http.Request, id string) (restful.Attributes, error) {
-	ctx := nucliocontext.NewDetached(request.Context())
+	ctx := context.WithoutCancel(request.Context())
 
 	// get project config and status from body
 	projectInfo, err := pr.getProjectInfoFromRequest(request)
@@ -210,6 +210,7 @@ func (pr *projectResource) GetCustomRoutes() ([]restful.CustomRoute, error) {
 	// since delete and update by default assume /resource/{id} and we want to get the id/namespace from the body
 	// we need to register custom routes
 	return []restful.CustomRoute{
+		// TODO: Deprecated. remove this custom update route in 1.15.x
 		{
 			Pattern:   "/",
 			Method:    http.MethodPut,
@@ -296,7 +297,8 @@ func (pr *projectResource) getFunctionsAndFunctionEventsMap(request *http.Reques
 
 	// create a map of attributes keyed by the function id (name)
 	for _, function := range functions {
-		functionsMap[function.GetConfig().Meta.Name] = functionResourceInstance.export(ctx, function)
+		exportOptions := pr.getExportOptionsFromRequest(request)
+		functionsMap[function.GetConfig().Meta.Name] = functionResourceInstance.export(ctx, function, exportOptions)
 
 		functionEvents := functionEventResourceInstance.getFunctionEvents(request, function, namespace)
 		for _, functionEvent := range functionEvents {
@@ -311,7 +313,7 @@ func (pr *projectResource) getFunctionsAndFunctionEventsMap(request *http.Reques
 func (pr *projectResource) createProject(request *http.Request, projectInfoInstance *projectInfo) (id string,
 	attributes restful.Attributes, responseErr error) {
 
-	ctx := nucliocontext.NewDetached(request.Context())
+	ctx := context.WithoutCancel(request.Context())
 
 	// create a project config
 	projectConfig := platform.ProjectConfig{
@@ -600,7 +602,7 @@ func (pr *projectResource) importProjectFunctionEvents(request *http.Request,
 	var failedFunctionEvents []restful.Attributes
 
 	for _, functionEvent := range projectImportInfoInstance.FunctionEvents {
-		switch functionName, found := functionEvent.Meta.Labels["nuclio.io/function-name"]; {
+		switch functionName, found := functionEvent.Meta.Labels[common.NuclioResourceLabelKeyFunctionName]; {
 		case !found:
 			failedFunctionEvents = append(failedFunctionEvents, restful.Attributes{
 				"functionEvent": functionEvent.Spec.DisplayName,
@@ -671,7 +673,7 @@ func (pr *projectResource) deleteProject(request *http.Request) (*restful.Custom
 		}, err
 	}
 
-	projectDeletionStrategy := request.Header.Get("x-nuclio-delete-project-strategy")
+	projectDeletionStrategy := request.Header.Get(headers.DeleteProjectStrategy)
 	requestOrigin, sessionCookie := pr.getRequestOriginAndSessionCookie(request)
 
 	if err := pr.getPlatform().DeleteProject(ctx, &platform.DeleteProjectOptions{
@@ -697,7 +699,7 @@ func (pr *projectResource) deleteProject(request *http.Request) (*restful.Custom
 	}, nil
 }
 
-// TODO: deprecate this custom route
+// TODO: Deprecated. remove this custom route in 1.15.x
 func (pr *projectResource) updateProject(request *http.Request) (*restful.CustomRouteFuncResponse, error) {
 
 	ctx := request.Context()
@@ -715,7 +717,7 @@ func (pr *projectResource) updateProject(request *http.Request) (*restful.Custom
 		return nil, errors.Wrap(err, "Failed to parse JSON body")
 	}
 
-	projectId := request.Header.Get("x-nuclio-project-name")
+	projectId := request.Header.Get(headers.ProjectName)
 	if projectInfoInstance.Meta != nil && projectInfoInstance.Meta.Name != "" {
 		projectId = projectInfoInstance.Meta.Name
 	}
@@ -749,7 +751,7 @@ func (pr *projectResource) projectToAttributes(project platform.Project) restful
 }
 
 func (pr *projectResource) getNamespaceFromRequest(request *http.Request) string {
-	return pr.getNamespaceOrDefault(request.Header.Get("x-nuclio-project-namespace"))
+	return pr.getNamespaceOrDefault(request.Header.Get(headers.ProjectNamespace))
 }
 
 func (pr *projectResource) getProjectInfoFromRequest(request *http.Request) (*projectInfo, error) {

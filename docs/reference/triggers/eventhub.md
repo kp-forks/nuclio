@@ -1,17 +1,19 @@
-# eventhub: Azure Event Hubs Trigger
+# Azure Event Hub trigger
+
+> **NOTE:**  Azure Event Hub trigger is in tech-preview.
 
 Reads events from [Microsoft Azure Event Hubs](https://azure.microsoft.com/services/event-hubs/).
 
 ## Attributes
 
-| **Path** | **Type** | **Description** |
-| :--- | :--- | :--- |
-| sharedAccessKeyName | string | Required by Azure Event Hubs |
-| sharedAccessKeyValue | string | Required by Azure Event Hubs |
-| namespace | string | Required by Azure Event Hubs |
-| eventHubName | string | Required by Azure Event Hubs |
-| consumerGroup | string | Required by Azure Event Hubs |
-| partitions | list of int | List of partitions on which this function receives events |
+| **Path**             | **Type**    | **Description**                                           |
+|:---------------------|:------------|:----------------------------------------------------------|
+| sharedAccessKeyName  | string      | Required by Azure Event Hubs                              |
+| sharedAccessKeyValue | string      | Required by Azure Event Hubs                              |
+| namespace            | string      | Required by Azure Event Hubs                              |
+| eventHubName         | string      | Required by Azure Event Hubs                              |
+| consumerGroup        | string      | Required by Azure Event Hubs                              |
+| partitions           | list of int | List of partitions on which this function receives events |
 
 ### Example
 

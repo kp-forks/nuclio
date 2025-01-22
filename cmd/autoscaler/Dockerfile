@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,21 +16,15 @@
 # Build stage: builds the autoscaler binary
 #
 
-ARG NUCLIO_LABEL
+ARG NUCLIO_DOCKER_IMAGE_TAG
 ARG NUCLIO_DOCKER_REPO
-ARG ALPINE_IMAGE=gcr.io/iguazio/alpine:3.15
+ARG ALPINE_IMAGE
 
-FROM $NUCLIO_DOCKER_REPO/nuclio-base:$NUCLIO_LABEL as build-autoscaler
+FROM $NUCLIO_DOCKER_REPO/nuclio-builder:$NUCLIO_DOCKER_IMAGE_TAG as build-autoscaler
 
 ARG NUCLIO_GO_LINK_FLAGS_INJECT_VERSION
 
-ARG GOOS=linux
-ARG GOARCH=amd64
-
-# build autoscaler
-RUN GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build \
-    -a \
-    -installsuffix cgo \
+RUN go build \
     -ldflags="${NUCLIO_GO_LINK_FLAGS_INJECT_VERSION}" \
     -o autoscaler cmd/autoscaler/main.go
 

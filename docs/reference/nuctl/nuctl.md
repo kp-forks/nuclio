@@ -1,4 +1,4 @@
-# The Nuclio CLI (nuctl)
+# Nuclio CLI
 
 #### In this document
 
@@ -50,7 +50,7 @@ You can also use the `--platform` CLI flag to ensure that you're running against
 
 To force `nuctl` to run locally, using a Docker daemon, add `--platform local` to the CLI command.
 
-For an example of function deployment using `nuctl` against Docker, see the Nuclio [Docker getting-started guide](/docs/setup/docker/getting-started-docker.md).
+For an example of function deployment using `nuctl` against Docker, see the Nuclio [Docker getting-started guide](../../setup/docker/getting-started-docker.md).
 
 <a id="kubernetes"></a>
 ### Kubernetes
@@ -59,7 +59,7 @@ To force `nuctl` to run against a Kubernetes instance of Nuclio, add `--platform
 
 When running on Kubernetes, `nuctl` requires a running registry on your Kubernetes cluster and access to a kubeconfig file.
 
-For an example of function deployment using `nuctl` against a Kubernetes cluster, see the Nuclio [Kubernetes getting-started guide](/docs/setup/k8s/getting-started-k8s.md#deploy-a-function-with-the-nuclio-cli).
+For an example of function deployment using `nuctl` against a Kubernetes cluster, see the Nuclio [Kubernetes getting-started guide](../../setup/k8s/getting-started-k8s.md#deploy-a-function-with-the-nuclio-cli).
 
 #### Invoking a function using nuctl on Kubernetes
 
@@ -68,7 +68,56 @@ While in most cases using `nuctl` on the [Local Docker](#docker) platform enable
 by default for some configurations. This means, for example, that `nuctl invoke` command will not be able to work
 unless your function is explicitly exposed or reachable from wherever you run `nuctl invoke`.
 
-See [exposing a function](/docs/tasks/deploying-functions.md#exposing-a-function) for more details.
+See [exposing a function](../../tasks/deploying-functions.md#exposing-a-function) for more details.
 
 For your convenience, when deploying a function using `nuctl`, exposing it via a `NodePort` can be easily done by using the
-CLI arg `--http-trigger-service-type=nodePort`.
+CLI arguments `--http-trigger-service-type=nodePort`.
+
+
+### Redeploying functions
+
+Redeploy allows deploying functions that have pre-built images, and have been deployed in the past.
+This is useful in cases when you change your platform (e.g. Kubernetes) environment, for backup and restore purposes, and so on.
+In case a full deployment is needed, along with rebuilding the function images, use `nuctl deploy` command.
+
+Currently `redeploy` command is the only command that uses dashboard API. Namely, it uses a `Patch` request.
+
+Use-cases:
+* [redeploy imported functions](#redeploying-imported-functions) (for instance, after platform migration, backup and restore, etc.)
+* simply redeploy an already existing function
+
+Functions can be successfully redeployed to either `ready` (default) or `scaledToZero` states. 
+To be able to redeploy function as `scaledToZero`, minimum replicas of function should be equal to zero.
+
+Command flags:
+* `verify-external-registry` - functions will be redeployed only if registry is external
+* `save-report` - allows to save redeployment report to a file. Path can be specified via `report-file-path` argument
+* `report-file-path` - report file path. Default is `./nuctl-redeployment-report.json`
+* `from-report` - redeploy failed retryable functions from report
+* `imported-only` - redeploy only imported functions
+* `desired-state` - redeploy to specific status. Choose any of those statuses: `[scaledToZero, ready]`.
+* `exclude-projects` - exclude projects
+* `exclude-functions` - exclude functions
+* `exclude-functions-with-gpu` - exclude only functions with GPU
+* `wait` - waits for redeployment to be completed
+* `wait-timeout` - waits timeout duration for the function redeployment
+
+#### Redeployment report interpretation
+Redeployment report contains 3 lists with function names - `Success, Skipped, Failed`.
+- `Success`: a list containing the names of functions that were successfully redeployed.
+- `Skipped`: a list containing function names that the redeployment process has skipped.
+- `Failed`: a list containing the functions that failed redeploying. For each failed function, the report contains a failure 
+descriptions and a boolean variable that shows whether rerunning the command can help.
+
+If `retryable == false` in your report, there are possible reasons:
+
+* No image field found in function config spec (check `spec.image`)
+* Desired state is `scaledToZero` but `minReplicas > 0`
+* `imported-flag` was used in redeploy command and function not in `imported` state
+
+#### Redeploying imported functions
+
+To redeploy only imported functions use `--imported-only` flag.
+
+An imported function can be redeployed to the state it had before being imported. To do so, the function should
+be exported with its previous state, meaning the function has a `nuclio.io/previous-state` annotation.

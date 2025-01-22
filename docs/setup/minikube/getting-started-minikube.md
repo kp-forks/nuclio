@@ -1,4 +1,4 @@
-# Getting Started with Nuclio on Minikube
+# Getting started with Nuclio on Minikube
 
 Follow this step-by-step guide to set up Nuclio on [Minikube](https://github.com/kubernetes/minikube/), which is a tool that lets you run Kubernetes locally.
 
@@ -16,9 +16,9 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
 
 - The following components are installed on your installation machine:
     - [Docker](https://docs.docker.com/get-docker/)
-    - [Minikube](https://kubernetes.io/docs/tasks/tools/install-minikube/)
+    - [Minikube](https://minikube.sigs.k8s.io/docs/start/)
     - [Helm](https://helm.sh/docs/intro/install/)
-- The [Nuclio CLI](/docs/reference/nuctl/nuctl.md) (`nuctl`) is installed &mdash; if you wish to [use the CLI to deploy Nuclio functions](#deploy-a-function-with-the-nuclio-cli-nuctl).
+- The [Nuclio CLI](../../reference/nuctl/nuctl.md) (`nuctl`) is installed &mdash; if you wish to [use the CLI to deploy Nuclio functions](#deploy-a-function-with-the-nuclio-cli-nuctl).
     To install the CLI, simply [download](https://github.com/nuclio/nuclio/releases) the appropriate CLI version to your installation machine.
 - It's recommended that you use these drivers:
 
@@ -32,14 +32,14 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
 Note that the following command also enables role-based access control (RBAC) so that you can get more comfortable working with an RBAC-enabled Kubernetes cluster:
 
 ```sh
-minikube start --kubernetes-version v1.20.11 --driver docker --extra-config=apiserver.authorization-mode=RBAC
+minikube start --kubernetes-version v1.27.5 --driver docker --extra-config=apiserver.authorization-mode=RBAC
 ```
 
 > **Note:** You may want to
-> - Change the Kubernetes version. Currently, the recommended version is 1.20.11.
+> - Change the Kubernetes version. Currently, the recommended version is 1.27.5.
 > - Change the minikube driver according to your environment and needs
 > - Add `--addons ingress` to your `minikube start` command to support creating function ingresses to flexibly
-> [expose your function](/docs/tasks/deploying-functions.md#exposing-a-function).
+> [expose your function](../../tasks/deploying-functions.md#exposing-a-function).
 >     Ensure that your function ingress appears on your hosts file (**/etc/hosts**).
 >     You can do this by running this command:
 >     ```sh
@@ -51,7 +51,7 @@ minikube start --kubernetes-version v1.20.11 --driver docker --extra-config=apis
 > **Note:** We are bringing up a local, simple, insecure docker registry. Instead, you can skip this step, 
 > and use any other docker registry, such as [Docker Hub](https://hub.docker.com/), [Azure Container Registry (ACR)](https://azure.microsoft.com/services/container-registry/),
 > or [Google Container Registry (GCR)](https://cloud.google.com/container-registry/).
-> See [Getting started with Kubernetes](/docs/setup/k8s/getting-started-k8s.md) for instructions. 
+> See [Getting started with Kubernetes](../../setup/k8s/getting-started-k8s.md) for instructions. 
 
 SSH into the minikube machine, and run the registry using `docker`:
 
@@ -63,7 +63,7 @@ Before Docker container images can be pushed to your newly created, insecure reg
 address (`$(minikube ip):5000`) to the list of insecure registries to instruct Docker to accept working against it:
 
 - **Docker for macOS** -  you can add it under **Preferences | Daemon**.
-- **Linux** - follow the instructions in the [Docker documentation](https://docs.docker.com/registry/insecure/#deploy-a-plain-http-registry).
+- **Linux** - follow the instructions in the [Docker documentation](https://docs.docker.com/registry).
 
 ## Install Nuclio
 
@@ -94,7 +94,7 @@ Use the command `minikube kubectl -- get pods --namespace nuclio` to verify both
 <a id="deploy-a-function-with-the-nuclio-cli-nuctl"></a>
 ## Deploy a function with the Nuclio CLI (nuctl)
 
-Run the following Nuclio CLI (`nuctl`) command from a command-line shell to deploy the example [`helloworld`](/hack/examples/golang/helloworld/helloworld.go) Go function.
+Run the following Nuclio CLI (`nuctl`) command from a command-line shell to deploy the example [`helloworld`](https://github.com/nuclio/nuclio/tree/development/hack/examples/golang/helloworld/helloworld.go) Go function.
 You can add the `--verbose` flag if you want to peek under the hood.
 ```sh
 nuctl deploy helloworld \
@@ -105,13 +105,13 @@ nuctl deploy helloworld \
     --run-registry localhost:5000
 ```
 >**Note:** The command above exposes the function externally using a `nodePort`. This is done for demonstration
-> purposes only. Please read more about [exposing your function](/docs/tasks/deploying-functions.md#exposing-a-function)
+> purposes only. Please read more about [exposing your function](../../tasks/deploying-functions.md#exposing-a-function)
 > for more information.
 
 >**Note:** The difference between the two registries specified in this command, and the reason for their addresses being different is as follows:
 >
 > - The `--registry` option defines the Docker registry onto which the function images that you build will be pushed. This is the registry that you previously brought up on your Minikube VM.
-> - The `--registry-run` option defines the registry from which the [`kubelet`](https://kubernetes.io/docs/reference/generated/kubelet/) Kubernetes "node agent" will pull the function images. Because this operation occurs in the Minikube VM, the command specifies `localhost` instead of the VM's IP address.
+> - The `--registry-run` option defines the registry from which the [`kubelet`](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/) Kubernetes "node agent" will pull the function images. Because this operation occurs in the Minikube VM, the command specifies `localhost` instead of the VM's IP address.
 
 When the function deployment completes, you can get the function information by running the following CLI command:
 ```sh
@@ -147,8 +147,8 @@ Hello, from Nuclio :]
 
 See the following resources to make the best of your new Nuclio environment:
 
-- [Deploying Functions](/docs/tasks/deploying-functions.md)
-- [Invoking Functions by Name with a Kubernetes Ingress](/docs/concepts/k8s/function-ingress.md)
-- [More function examples](/hack/examples/README.md)
-- [References](/docs/reference)
-- [Best Practices and Common Pitfalls](/docs/concepts/best-practices-and-common-pitfalls.md)
+- [Deploying Functions](../../tasks/deploying-functions.md)
+- [Invoking Functions by Name with a Kubernetes Ingress](../../concepts/k8s/function-ingress.md)
+- [More function examples](../../examples/README.md)
+- [References](../../reference/index)
+- [Best Practices and Common Pitfalls](../../concepts/best-practices-and-common-pitfalls.md)

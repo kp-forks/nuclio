@@ -1,7 +1,7 @@
 //go:build test_integration && test_local && test_broken
 
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -108,7 +108,7 @@ func (suite *testConfluentSuite) TestReceiveRecords() {
 		"confluent-kafka": {
 			Kind:       "kafka-cluster",
 			URL:        suite.brokerURL,
-			MaxWorkers: 4,
+			NumWorkers: 4,
 			Attributes: map[string]interface{}{
 				"topics":        []string{suite.topic},
 				"consumerGroup": suite.consumerGroup,
@@ -135,7 +135,8 @@ func (suite *testConfluentSuite) TestReceiveRecords() {
 			},
 		},
 		nil,
-		suite.publishMessageToTopic)
+		suite.publishMessageToTopic,
+		nil)
 }
 
 func (suite *testConfluentSuite) publishMessageToTopic(topic string, body string) error {

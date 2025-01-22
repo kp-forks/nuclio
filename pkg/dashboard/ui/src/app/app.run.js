@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,9 +43,9 @@ limitations under the License.
                     .then(function (response) {
                         lodash.assign(ConfigService.nuclio, {
                             allowedAuthenticationModes: lodash.get(response, 'allowedAuthenticationModes', []),
-                            autoScaleMetrics: lodash.get(response, 'autoScaleMetrics', {}),
                             defaultFunctionConfig: lodash.get(response, 'defaultFunctionConfig', {}),
                             defaultFunctionPodResources: lodash.get(response, 'defaultFunctionPodResources', {}),
+                            disableDefaultHttpTrigger: lodash.get(response, 'disableDefaultHttpTrigger', false),
                             externalIPAddress: lodash.get(response, 'externalIPAddresses[0]', ''),
                             imageNamePrefixTemplate: lodash.get(response, 'imageNamePrefixTemplate', ''),
                             ingressHostTemplate: lodash.get(response, 'defaultHTTPIngressHostTemplate', ''),
@@ -89,7 +89,7 @@ limitations under the License.
                 backendOptions: [
                     {
                         expirationTime: ConfigService.i18nextExpirationTime,
-                        defaultVersion: 'v0.5'
+                        defaultVersion: 'v0.72'
                     },
                     {
                         loadPath: 'assets/i18n/{{lng}}/{{ns}}.json',

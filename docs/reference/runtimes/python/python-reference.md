@@ -1,4 +1,4 @@
-# Python Reference
+# Python
 
 This document describes the specific Python build and deploy configurations.
 
@@ -6,10 +6,12 @@ This document describes the specific Python build and deploy configurations.
 
 - [Function and handler](#function-and-handler)
 - [Dockerfile](#dockerfile)
-- [Python runtime 2.7 EOL](#python-runtime-27-eol)
-- [Introducing Python runtimes 3.7, 3.8 and 3.9](#introducing-python-runtimes-37-38-and-39)
+- [Supported versions](#supported-versions)
+- [Python versions EOL](#python-runtime-eol)
 - [Function configuration](#function-configuration)
 - [Build and execution](#build-and-execution)
+- [Portable execution](#portable-execution)
+- [Termination callback](#termination-callback)
 
 ## Function and handler
 
@@ -27,7 +29,7 @@ For asynchronous support (e.g.: `asyncio`), you may want to decorate your functi
 
 Important to note:
   - Nuclio, at the moment, does not support concurrent requests handling for a single working. Each working may handle
-    one request at a time, for more information see [here](/docs/concepts/architecture.md#runtime-engine).
+    one request at a time, for more information see [here](../../../concepts/architecture.md#runtime-engine).
   - However, using an async handler can still be beneficial in some scenarios; Since the event loop would keep running while listening on more incoming requests, it allows functions to asynchronously perform
     I/O bound background tasks.
 
@@ -47,7 +49,7 @@ async def update_db(context, event):
 
 ## Dockerfile
 
-Following is sample Dockerfile code for deploying a Python function. For more information, see [Deploying Functions from a Dockerfile](/docs/tasks/deploy-functions-from-dockerfile.md).
+Following is sample Dockerfile code for deploying a Python function. For more information, see [Deploying Functions from a Dockerfile](../../../tasks/deploy-functions-from-dockerfile.md).
 
 > **Note:** Make sure to replace `my-function-code` and `my-function.yaml` in the following example with the names of your function and function-configuration file.
 
@@ -88,31 +90,15 @@ COPY . /opt/nuclio
 CMD [ "processor" ]
 ```
 
-<a id="python-runtime-27-eol"></a>
-## Python runtime 2.7 EOL
+## Supported versions
+* Python 3.9
+* Python 3.10
+* Python 3.11
 
-As of Jan 2020, [Python 2.7 is no longer being maintained](https://www.python.org/doc/sunset-python-2/), and it has now
-also reached its End Of Life in Nuclio as well, and thus removed as a supported runtime from the mainline Nuclio
-releases. Starting from [Nuclio 1.6.0](https://github.com/nuclio/nuclio/releases/tag/1.6.0) you would not be able to
-deploy any Nuclio function using Python 2.7 runtime.
+These versions are no longer supported: [EOL versions](#python-versions-eol)
 
-To keep using latest Nuclio, and reach better performance and message throughput, we strongly suggest migrating your
-code to the newer [Python 3.7, 3.8 and 3.9 runtimes](#introducing-python-runtimes-37-38-and-39), if you haven't already.
-
-<a id="introducing-python-runtimes-37-38-and-39"></a>
-## Introducing Python runtimes 3.7, 3.8 and 3.9
-
-Nuclio officially supports python 3.7, 3.8 and python 3.9 (along with good-old python 3.6) as stand-alone runtimes. Along
-with simply bumping the python versions, some changes to the internal function processor were made, to take advantage of
-new language features and newer packages.
-
-Key differences and changes:
-
-- Python 3.8+ is 5%-8% faster than Python 3.6 for small sized event messages.
-- Python 3.7, 3.8 and 3.9 base images are `python:3.7`, `python:3.8` and `python:3.9`, respectively.
-
-In Python 3.7+ runtimes, events metadata, such as headers, path, method, etc can be decoded as byte-strings. 
-This may incur changes in your code to refer to the various (now) byte-string event properties correctly in the new runtimes. 
+In Python 3.9+ runtimes, events metadata, such as headers, path, method, etc can be decoded as byte-strings.
+This may incur changes in your code to refer to the various (now) byte-string event properties correctly in the new runtimes.
 e.g.: Simple code snipped which worked on python 2.7 and 3.6, using some event metadata, such as `event.path`
 
 To disable the utf8 decoding, set the function environment variable: `NUCLIO_PYTHON_DECODE_EVENT_STRINGS` to `disabled`.
@@ -136,13 +122,26 @@ The new snippet would be looking like this:
       return "I'm doing something..."
   ```
 
-  > Note: To *disable* decoding to all incoming events to byte-strings, set the function environment variable: `NUCLIO_PYTHON_DECODE_EVENT_STRINGS=true`.
-  > Not disabling event strings decoding means that the Nuclio python wrapper might fail to handle events with non-utf8 metadata contents.
+> Note: To *disable* decoding to all incoming events to byte-strings, set the function environment variable: `NUCLIO_PYTHON_DECODE_EVENT_STRINGS=true`.
+> Not disabling event strings decoding means that the Nuclio python wrapper might fail to handle events with non-utf8 metadata contents.
+
+<a id="python-versions-eol"></a>
+## Python versions EOL
+The following Python versions are no longer supported in Nuclio, due to their End Of Life (EOL) status:
+- Python 2.7 (EOL since Jan 2020)
+- Python 3.6 (EOL since Dec 2021)
+- Python 3.7 (EOL since June 2023)
+- Python 3.8 (EOL since October 2024)
+
+For more information, see the [Python version status](https://devguide.python.org/versions/) page.
+
+To keep using latest Nuclio, and reach better performance and message throughput, we strongly suggest migrating your
+code to Python 3.9 or higher.
 
 <a id="function-configuration"></a>
 ## Function configuration
 
-Your function-configuration file (for example, **my-function.yaml** for the [example Dockerfile](#dockerfile)) must include the name of your handler function and Python runtime. For more information, see the [function-configuration reference](/docs/reference/function-configuration/function-configuration-reference.md). For example:
+Your function-configuration file (for example, **my-function.yaml** for the [example Dockerfile](#dockerfile)) must include the name of your handler function and Python runtime. For more information, see the [function-configuration reference](../../../reference/function-configuration/function-configuration-reference.md). For example:
 
 ```yaml
 meta:
@@ -152,7 +151,7 @@ spec:
   runtime: python:3.8
   triggers:
     myHttpTrigger:
-      maxWorkers: 1
+      numWorkers: 1
       kind: "http"
 
 ```
@@ -193,3 +192,16 @@ docker run \
 
 That way, you can build your function once, deploy it as much as desired, 
 without being needed to volumize the function configuration upon each deployment.
+
+## Termination callback
+
+As of now, this feature is exclusively supported in the Python runtime. It enables the definition of a termination callback within user code through the following:
+```py
+context.platform.set_termination_callback(callback)  # where 'callback' is a user-defined function
+```
+Termination callback is triggered by the processor when it is about to exit.
+The termination callback facilitates a graceful shutdown.
+
+Additionally, we offer a [drain callback](../../triggers/kafka.md#drain-callback) option for stream triggers.
+
+

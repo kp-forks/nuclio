@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ func (f *factory) Create(parentLogger logger.Logger,
 		namedWorkerAllocators,
 		func() (worker.Allocator, error) {
 			return worker.WorkerFactorySingleton.CreateFixedPoolWorkerAllocator(triggerLogger,
-				configuration.MaxWorkers,
+				configuration.NumWorkers,
 				runtimeConfiguration)
 		})
 
@@ -68,7 +68,9 @@ func (f *factory) Create(parentLogger logger.Logger,
 		return nil, errors.Wrap(err, "Failed to initialize trigger")
 	}
 
-	triggerLogger.DebugWith("Created trigger", "config", configuration)
+	triggerLogger.DebugWith("Created trigger",
+		"triggerName", configuration.Name,
+		"triggerKind", configuration.Kind)
 	return triggerInstance, nil
 }
 

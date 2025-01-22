@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ func (suite *lazyTestSuite) TestEnsurePrimaryIngressHasXNuclioTargetHeader() {
 		On("Run", mock.Anything, mock.IsType(""), mock.Anything).
 		Return("echo ehsom | htpasswd -n -i moshe", nil)
 
-	resources, err := suite.client.CreateOrUpdate(context.Background(), &nuclioio.NuclioAPIGateway{
+	resources, err := suite.client.CreateOrUpdate(context.Background(), nuclioio.NuclioAPIGateway{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-name",
 			Namespace: "test-namespace",

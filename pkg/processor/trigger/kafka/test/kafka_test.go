@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"testing"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/stretchr/testify/suite"
+	"k8s.io/api/core/v1"
 )
 
 type testSuite struct {
@@ -109,7 +111,6 @@ func (suite *testSuite) SetupSuite() {
 	// connect to the broker
 	err = suite.broker.Open(brokerConfig)
 	suite.Require().NoError(err, "Failed to open broker")
-
 	// create topic
 	createTopicsResponse, err := suite.broker.CreateTopics(&sarama.CreateTopicsRequest{
 		TopicDetails: map[string]*sarama.TopicDetail{
@@ -140,41 +141,83 @@ func (suite *testSuite) TearDownSuite() {
 }
 
 func (suite *testSuite) TestReceiveRecords() {
-	functionName := "event_recorder"
-	createFunctionOptions := suite.GetDeployOptions(functionName, suite.FunctionPaths["python"])
-	createFunctionOptions.FunctionConfig.Spec.Platform = functionconfig.Platform{
-		Attributes: map[string]interface{}{
-			"network": suite.BrokerContainerNetworkName,
+	// we don't reset it every test, because all tests use the same topic to write to
+	expectedNumberOfCommittedMessages := 0
+	for _, testCase := range []struct {
+		name         string
+		functionPath string
+		runtime      string
+		dependencies []string
+		handler      string
+	}{
+		{
+			name:         "python-runtime",
+			functionPath: suite.FunctionPaths["python"],
+			runtime:      "python",
 		},
-	}
+		{
+			name:         "golang-runtime",
+			functionPath: suite.FunctionPaths["golang"],
+			runtime:      "golang",
+		},
+		{
+			name:         "java-runtime",
+			functionPath: suite.FunctionPaths["java"],
+			runtime:      "java",
+			dependencies: []string{"group: org.json, name: json, version: 20210307"},
+			handler:      "Handler",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			functionName := "event_recorder"
+			createFunctionOptions := suite.GetDeployOptions(functionName, testCase.functionPath)
+			createFunctionOptions.FunctionConfig.Spec.Runtime = testCase.runtime
+			if testCase.handler != "" {
+				createFunctionOptions.FunctionConfig.Spec.Handler = testCase.handler
+			}
+			createFunctionOptions.FunctionConfig.Spec.Build.Dependencies = testCase.dependencies
+			createFunctionOptions.FunctionConfig.Spec.Platform = functionconfig.Platform{
+				Attributes: map[string]interface{}{
+					"network": suite.BrokerContainerNetworkName,
+				},
+			}
 
-	createFunctionOptions.FunctionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
-		"my-kafka": {
-			Kind: "kafka-cluster",
-			URL:  fmt.Sprintf("%s:9090", suite.brokerContainerName),
-			Attributes: map[string]interface{}{
-				"topics":        []string{suite.topic},
-				"consumerGroup": functionName,
-				"initialOffset": suite.initialOffset,
-			},
-			WorkerTerminationTimeout: "5s",
-		},
-	}
+			createFunctionOptions.FunctionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
+				"my-kafka": {
+					Kind: "kafka-cluster",
+					URL:  fmt.Sprintf("%s:9090", suite.brokerContainerName),
+					Attributes: map[string]interface{}{
+						"topics":        []string{suite.topic},
+						"consumerGroup": functionName,
+						"initialOffset": suite.initialOffset,
+					},
+					WorkerTerminationTimeout: "5s",
+				},
+			}
 
-	triggertest.InvokeEventRecorder(&suite.AbstractBrokerSuite.TestSuite,
-		suite.BrokerHost,
-		createFunctionOptions,
-		map[string]triggertest.TopicMessages{
-			suite.topic: {
-				NumMessages: int(suite.NumPartitions),
-			},
-		},
-		nil,
-		suite.publishMessageToTopic)
+			expectedNumberOfCommittedMessages += int(suite.NumPartitions)
+
+			triggertest.InvokeEventRecorder(&suite.AbstractBrokerSuite.TestSuite,
+				suite.BrokerHost,
+				createFunctionOptions,
+				map[string]triggertest.TopicMessages{
+					suite.topic: {
+						NumMessages:         int(suite.NumPartitions),
+						CustomMessagePrefix: testCase.runtime,
+					},
+				},
+				nil,
+				suite.publishMessageToTopic,
+				&triggertest.PostPublishChecks{
+					ValidateAckFunction:              suite.validateNumberOfCommittedOffsets,
+					ExpectedNumberOfCommittedOffsets: expectedNumberOfCommittedMessages,
+					ConsumerGroup:                    functionName,
+				})
+		})
+	}
 }
 
 func (suite *testSuite) TestExplicitAck() {
-
 	topic := "myNewTopic"
 	shardID := int32(1)
 	functionName := "explicitacker"
@@ -198,92 +241,251 @@ func (suite *testSuite) TestExplicitAck() {
 		"topic", topic,
 		"createTopicResponse", createTopicsResponse)
 
-	// create explicit ack function
+	for _, testCase := range []struct {
+		name            string
+		explicitAckMode functionconfig.ExplicitAckMode
+	}{
+		{
+			name:            "EnableMode",
+			explicitAckMode: functionconfig.ExplicitAckModeEnable,
+		},
+		{
+			name:            "ExplicitOnly",
+			explicitAckMode: functionconfig.ExplicitAckModeExplicitOnly,
+		},
+	} {
+		suite.Run(testCase.name, func() {
 
+			// create explicit ack function
+			createFunctionOptions := suite.GetDeployOptions(functionName, functionPath)
+			createFunctionOptions.FunctionConfig.Spec.Build.Commands = []string{"pip install nuclio-sdk"}
+			createFunctionOptions.FunctionConfig.Spec.Platform = functionconfig.Platform{
+				Attributes: map[string]interface{}{
+					"network": suite.BrokerContainerNetworkName,
+				},
+			}
+
+			// configure kafka trigger with explicit ack enabled
+			createFunctionOptions.FunctionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
+				"my-kafka": {
+					Kind: "kafka-cluster",
+					URL:  fmt.Sprintf("%s:9090", suite.brokerContainerName),
+					Attributes: map[string]interface{}{
+						"topics":               []string{topic},
+						"consumerGroup":        functionName,
+						"initialOffset":        suite.initialOffset,
+						"workerAllocationMode": string(partitionworker.AllocationModeStatic),
+					},
+					WorkerTerminationTimeout: "5s",
+					ExplicitAckMode:          testCase.explicitAckMode,
+				},
+				"my-http": {
+					Kind:       "http",
+					Attributes: map[string]interface{}{},
+				},
+			}
+
+			// deploy function
+			suite.DeployFunction(createFunctionOptions, func(deployResult *platform.CreateFunctionResult) bool {
+				suite.Require().NotNil(deployResult, "Unexpected empty deploy results")
+
+				var err error
+
+				// publish 10 messages to the topic
+				for i := 0; i < 10; i++ {
+					err = suite.publishMessageToTopicOnSpecificShard(topic, fmt.Sprintf("message-%d", i), shardID)
+					suite.Require().NoError(err, "Failed to publish message")
+				}
+
+				// ensure queue size is 10
+				suite.Logger.Debug("Getting current queue size")
+				queueSize := suite.waitForFunctionQueueSize(deployResult.Port, 10, 5*time.Second)
+				suite.Require().Equal(queueSize, 10, "Queue size is not 10")
+
+				// ensure commit offset is 0
+				suite.Logger.Debug("Getting commit offset before processing")
+				commitOffset := suite.getLastCommitOffsetFromFunction(deployResult.Port)
+				suite.Require().Equal(commitOffset, 0, "Commit offset is not 0")
+
+				// send http request "start processing"
+				suite.Logger.Debug("Sending start processing request")
+				body := map[string]string{
+					"resource": "start_processing",
+				}
+
+				marshalledBody, err := json.Marshal(body)
+				suite.Require().NoError(err, "Failed to marshal body")
+				response, err := suite.SendHTTPRequest(&triggertest.Request{
+					Method: http.MethodPost,
+					Port:   deployResult.Port,
+					Body:   string(marshalledBody),
+				})
+				suite.Require().NoError(err, "Failed to send request")
+				suite.Require().Equal(http.StatusOK, response.StatusCode)
+
+				time.Sleep(2 * time.Second)
+
+				// ensure queue size is 0 (or < 10)
+				suite.Logger.Debug("Getting queue size after processing")
+				queueSize = suite.waitForFunctionQueueSize(deployResult.Port, 0, 5*time.Second)
+				suite.Require().Equal(queueSize, 0, "Queue size is not 0")
+
+				// ensure commit offset is 9 (10 in zero-indexed offsets)
+				suite.Logger.Debug("Getting commit offset after processing")
+				commitOffset = suite.getLastCommitOffsetFromFunction(deployResult.Port)
+				suite.Require().Equal(commitOffset, 9, "Commit offset is not 10")
+
+				return true
+			})
+		})
+	}
+}
+
+func (suite *testSuite) TestDrainHook() {
+	topic := "myTopicDraining"
+	defer func() {
+		// delete topic
+		_, err := suite.broker.DeleteTopics(&sarama.DeleteTopicsRequest{
+			Topics: []string{topic},
+		})
+		suite.Require().NoError(err, "Failed to delete topic")
+	}()
+	functionName := "drain-hook"
+	functionPath := path.Join(suite.GetTestFunctionsDir(),
+		"python",
+		"drain-hook",
+		"drain-hook.py")
+
+	// create new topic
+	createTopicsResponse, err := suite.broker.CreateTopics(&sarama.CreateTopicsRequest{
+		TopicDetails: map[string]*sarama.TopicDetail{
+			topic: {
+				NumPartitions:     suite.NumPartitions,
+				ReplicationFactor: 1,
+			},
+		},
+	})
+	suite.Require().NoError(err, "Failed to create topic")
+
+	suite.Logger.InfoWith("Created topic",
+		"topic", topic,
+		"createTopicResponse", createTopicsResponse)
+
+	// create a function
 	createFunctionOptions := suite.GetDeployOptions(functionName, functionPath)
-	createFunctionOptions.FunctionConfig.Spec.Build.Commands = []string{"pip install nuclio-sdk"}
-	createFunctionOptions.FunctionConfig.Spec.Platform = functionconfig.Platform{
+
+	platformSpec := functionconfig.Platform{
 		Attributes: map[string]interface{}{
 			"network": suite.BrokerContainerNetworkName,
 		},
 	}
+	createFunctionOptions.FunctionConfig.Spec.Platform = platformSpec
 
-	// configure kafka trigger with explicit ack enabled
-	createFunctionOptions.FunctionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
+	// configure kafka trigger
+	triggerSpec := map[string]functionconfig.Trigger{
 		"my-kafka": {
 			Kind: "kafka-cluster",
 			URL:  fmt.Sprintf("%s:9090", suite.brokerContainerName),
 			Attributes: map[string]interface{}{
-				"topics":        []string{topic},
-				"consumerGroup": functionName,
-				"initialOffset": suite.initialOffset,
+				"topics":               []string{topic},
+				"consumerGroup":        suite.consumerGroup,
+				"initialOffset":        suite.initialOffset,
+				"workerAllocationMode": string(partitionworker.AllocationModeStatic),
 			},
-			WorkerTerminationTimeout: "5s",
-			ExplicitAckMode:          functionconfig.ExplicitAckModeEnable,
+			WorkerTerminationTimeout: "40s",
+			NumWorkers:               4,
 		},
-		"my-http": {
-			Kind:       "http",
-			Attributes: map[string]interface{}{},
+	}
+	createFunctionOptions.FunctionConfig.Spec.Triggers = triggerSpec
+
+	// create a temp dir, delete it after the test
+	tempDir, err := os.MkdirTemp("", "drain-hook")
+	suite.Require().NoError(err, "Failed to create temp dir")
+	defer os.RemoveAll(tempDir) // nolint: errcheck
+
+	mountPath := "/tmp/nuclio"
+	directoryType := v1.HostPathDirectory
+
+	// mount it to the function
+	createFunctionOptions.FunctionConfig.Spec.Volumes = []functionconfig.Volume{
+		{
+			Volume: v1.Volume{
+				Name: "drain-hook",
+				VolumeSource: v1.VolumeSource{
+					HostPath: &v1.HostPathVolumeSource{
+						Path: tempDir,
+						Type: &directoryType,
+					},
+				},
+			},
+			VolumeMount: v1.VolumeMount{
+				Name:      "drain-hook",
+				ReadOnly:  false,
+				MountPath: mountPath,
+			},
 		},
 	}
 
-	// set worker allocation mode to static
-	createFunctionOptions.FunctionConfig.Meta.Annotations = map[string]string{
-		"nuclio.io/kafka-worker-allocation-mode": string(partitionworker.AllocationModeStatic),
-	}
+	var rebalanceStartedTime time.Time
 
 	// deploy function
 	suite.DeployFunction(createFunctionOptions, func(deployResult *platform.CreateFunctionResult) bool {
 		suite.Require().NotNil(deployResult, "Unexpected empty deploy results")
 
-		var err error
+		// write messages on 4 shards
+		for partitionIdx := int32(0); partitionIdx < suite.NumPartitions; partitionIdx++ {
+			messageBody := fmt.Sprintf("%s-%d", "messagingCycleA", partitionIdx)
 
-		// publish 10 messages to the topic
-		for i := 0; i < 10; i++ {
-			err = suite.publishMessageToTopicOnSpecificShard(topic, fmt.Sprintf("message-%d", i), shardID)
+			// send the message
+			err := suite.publishMessageToTopicOnSpecificShard(topic, messageBody, partitionIdx)
 			suite.Require().NoError(err, "Failed to publish message")
 		}
 
-		// ensure queue size is 10
-		suite.Logger.Debug("Getting current queue size")
-		queueSize := suite.waitForFunctionQueueSize(deployResult.Port, 10, 5*time.Second)
-		suite.Require().Equal(queueSize, 10, "Queue size is not 10")
+		// create another function that consumes from the same topic and consumer group, to trigger rebalance
+		newCreateFunctionOptions := suite.GetDeployOptions("drain-hook-new", functionPath)
+		newCreateFunctionOptions.FunctionConfig.Spec.Platform = platformSpec
+		newCreateFunctionOptions.FunctionConfig.Spec.Triggers = triggerSpec
 
-		// ensure commit offset is 0
-		suite.Logger.Debug("Getting commit offset before processing")
-		commitOffset := suite.getLastCommitOffset(deployResult.Port)
-		suite.Require().Equal(commitOffset, 0, "Commit offset is not 0")
+		suite.Logger.Debug("Creating second function, to trigger rebalance")
 
-		// send http request "start processing"
-		suite.Logger.Debug("Sending start processing request")
-		body := map[string]string{
-			"resource": "start_processing",
-		}
+		suite.DeployFunction(newCreateFunctionOptions, func(newDeployResult *platform.CreateFunctionResult) bool {
+			suite.Require().NotNil(deployResult, "Unexpected empty second deploy results")
+			rebalanceStartedTime = time.Now()
 
-		marshalledBody, err := json.Marshal(body)
-		suite.Require().NoError(err, "Failed to marshal body")
-		response, err := suite.SendHTTPRequest(&triggertest.Request{
-			Method: http.MethodPost,
-			Port:   deployResult.Port,
-			Body:   string(marshalledBody),
+			suite.Logger.DebugWith("Created second function, producing messages to topic",
+				"topic", topic)
+
+			// write messages to all 4 shards
+			for partitionIdx := int32(0); partitionIdx < suite.NumPartitions; partitionIdx++ {
+				messageBody := fmt.Sprintf("%s-%d", "messagingCycleB", partitionIdx)
+
+				// send the message
+				err := suite.publishMessageToTopicOnSpecificShard(topic, messageBody, partitionIdx)
+				suite.Require().NoError(err, "Failed to publish message")
+			}
+
+			// wait for at least the kafka trigger's WorkerTerminationTimeout to pass from first invocation,
+			// to allow the function to run its termination hook before we delete the function
+			<-time.After(time.Until(rebalanceStartedTime.Add(40 * time.Second)))
+
+			return true
 		})
-		suite.Require().NoError(err, "Failed to send request")
-		suite.Require().Equal(http.StatusOK, response.StatusCode)
-
-		time.Sleep(2 * time.Second)
-
-		// ensure queue size is 0 (or < 10)
-		suite.Logger.Debug("Getting queue size after processing")
-		queueSize = suite.waitForFunctionQueueSize(deployResult.Port, 0, 5*time.Second)
-		suite.Require().Equal(queueSize, 0, "Queue size is not 0")
-
-		// ensure commit offset is 9 (10 in zero-indexed offsets)
-		suite.Logger.Debug("Getting commit offset after processing")
-		commitOffset = suite.getLastCommitOffset(deployResult.Port)
-		suite.Require().Equal(commitOffset, 9, "Commit offset is not 10")
 
 		return true
 	})
+
+	// check that the function's drain hook was called by reading the file it should have written to
+	// 1 file per worker -> 4 files
+	for workerID := 0; workerID < 4; workerID++ {
+		filePath := path.Join(tempDir, fmt.Sprintf("drain-hook-%d.txt", workerID))
+		suite.Logger.DebugWith("Reading drain hook file", "filePath", filePath)
+		fileBytes, err := os.ReadFile(filePath)
+		suite.Require().NoError(err, "Failed to read drain hook file")
+
+		// check that the file is not empty
+		suite.Logger.DebugWith("Checking drain hook file is not empty", "fileContent", string(fileBytes))
+		suite.Require().NotEmpty(fileBytes, "Drain hook file is empty")
+	}
 }
 
 //func (suite *testSuite) TestEventRecorderRebalance() {
@@ -461,7 +663,7 @@ func (suite *testSuite) TestExplicitAck() {
 
 // GetContainerRunInfo returns information about the broker container
 func (suite *testSuite) GetContainerRunInfo() (string, *dockerclient.RunOptions) {
-	return "wurstmeister/kafka", &dockerclient.RunOptions{
+	return "gcr.io/iguazio/kafka", &dockerclient.RunOptions{
 		ContainerName: suite.brokerContainerName,
 		Network:       suite.BrokerContainerNetworkName,
 		Remove:        true,
@@ -487,12 +689,12 @@ func (suite *testSuite) GetContainerRunInfo() (string, *dockerclient.RunOptions)
 }
 
 func (suite *testSuite) getKafkaZooKeeperContainerRunInfo() (string, *dockerclient.RunOptions) {
-	return "wurstmeister/zookeeper", &dockerclient.RunOptions{
+	return "gcr.io/iguazio/zookeeper", &dockerclient.RunOptions{
 		ContainerName: suite.zooKeeperContainerName,
 		Network:       suite.BrokerContainerNetworkName,
 		Remove:        true,
 		Ports: map[int]int{
-			dockerclient.RunOptionsNoPort: 2181,
+			dockerclient.RunOptionsRandomPort: 2181,
 		},
 	}
 }
@@ -519,7 +721,7 @@ func (suite *testSuite) publishMessageToTopicOnSpecificShard(topic string, body 
 	return nil
 }
 
-func (suite *testSuite) resolveReceivedEventBodies(deployResult *platform.CreateFunctionResult) []string {
+func (suite *testSuite) resolveReceivedEventBodies(deployResult *platform.CreateFunctionResult) []string { // nolint: unused
 
 	receivedEvents, err := triggertest.GetEventRecorderReceivedEvents(suite.Logger, suite.BrokerHost, deployResult.Port)
 	suite.Require().NoError(err)
@@ -537,7 +739,53 @@ func (suite *testSuite) resolveReceivedEventBodies(deployResult *platform.Create
 	return receivedBodies
 }
 
-func (suite *testSuite) getLastCommitOffset(port int) int {
+func (suite *testSuite) validateNumberOfCommittedOffsets(consumerGroup string, topic string, expectedNumberOfCommittedOffsets int) bool {
+	if topic == "" {
+		topic = suite.topic
+	}
+	numberOfCommittedOffsets, err := suite.getNumberOfCommittedOffsetsFromBroker(consumerGroup, topic, int(suite.NumPartitions))
+	if err != nil {
+		return false
+	}
+	return int(numberOfCommittedOffsets) == expectedNumberOfCommittedOffsets
+}
+
+func (suite *testSuite) getNumberOfCommittedOffsetsFromBroker(consumerGroup, topic string, partitions int) (int64, error) {
+	// Create an OffsetFetchRequest
+	request := &sarama.OffsetFetchRequest{
+		ConsumerGroup: consumerGroup,
+		Version:       1,
+	}
+
+	for partition := 0; partition < partitions; partition++ {
+		request.AddPartition(topic, int32(partition))
+	}
+
+	// Send the request to the broker
+	response, err := suite.broker.FetchOffset(request)
+	if err != nil {
+		return -1, fmt.Errorf("Failed to fetch offsets: %w", err)
+	}
+
+	// Sum committed offsets across all partitions
+	var totalOffset int64 = 0
+	for partition := 0; partition < partitions; partition++ {
+		block := response.GetBlock(topic, int32(partition))
+		if block == nil {
+			return -1, fmt.Errorf("No offset block returned for topic %s partition %d", topic, partition)
+		}
+		if block.Err != sarama.ErrNoError {
+			return -1, fmt.Errorf("Error in offset block for partition %d: %v", partition, block.Err)
+		}
+		if block.Offset != -1 {
+			totalOffset += block.Offset
+		}
+	}
+
+	return totalOffset, nil
+}
+
+func (suite *testSuite) getLastCommitOffsetFromFunction(port int) int {
 	body := map[string]string{
 		"resource": "last_committed_offset",
 	}

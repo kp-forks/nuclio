@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -151,6 +151,7 @@ func (suite *KubePlatformTestSuite) ResetCRDMocks() {
 	suite.platform.deleter, _ = client.NewDeleter(suite.Logger, suite.platform)
 	suite.platform.deployer, _ = client.NewDeployer(suite.Logger, suite.platform.consumer, suite.platform)
 	suite.platform.projectsClient, _ = NewProjectsClient(suite.platform, suite.abstractPlatform.Config)
+	suite.platform.apiGatewayScrubber = platform.NewAPIGatewayScrubber(suite.Logger, platform.GetAPIGatewaySensitiveField(), suite.platform.consumer.KubeClientSet)
 }
 
 type ProjectKubePlatformTestSuite struct {
@@ -257,47 +258,6 @@ type FunctionKubePlatformTestSuite struct {
 	KubePlatformTestSuite
 }
 
-func (suite *FunctionKubePlatformTestSuite) TestFunctionNodeSelectorEnrichment() {
-	defaultNodeSelector := map[string]string{
-		"a": "b",
-	}
-	suite.platform.Config.Kube.DefaultFunctionNodeSelector = defaultNodeSelector
-	for _, testCase := range []struct {
-		name                 string
-		nodeSelector         map[string]string
-		expectedNodeSelector map[string]string
-	}{
-		{
-			name:                 "enrich",
-			nodeSelector:         nil,
-			expectedNodeSelector: defaultNodeSelector,
-		},
-		{
-			name:                 "skipEnrichmentEmpty",
-			nodeSelector:         map[string]string{},
-			expectedNodeSelector: map[string]string{},
-		},
-		{
-			name: "skipEnrichmentFilled",
-			nodeSelector: map[string]string{
-				"a": "c",
-			},
-			expectedNodeSelector: map[string]string{
-				"a": "c",
-			},
-		},
-	} {
-		suite.Run(testCase.name, func() {
-			functionConfig := functionconfig.NewConfig()
-			functionConfig.Spec.NodeSelector = testCase.nodeSelector
-			err := suite.platform.EnrichFunctionConfig(suite.ctx, functionConfig)
-			suite.Require().NoError(err)
-			suite.Require().Equal(testCase.expectedNodeSelector, functionConfig.Spec.NodeSelector)
-
-		})
-	}
-}
-
 func (suite *FunctionKubePlatformTestSuite) TestValidateServiceType() {
 	for idx, testCase := range []struct {
 		name                 string
@@ -360,9 +320,292 @@ func (suite *FunctionKubePlatformTestSuite) TestValidateServiceType() {
 			}
 			createFunctionOptions.FunctionConfig.Meta.Name = functionName
 			createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
-				"nuclio.io/project-name": platform.DefaultProjectName,
+				common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
 			}
 			suite.Logger.DebugWith("Checking function ", "functionName", functionName)
+
+			err := suite.platform.ValidateFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
+			if testCase.shouldFailValidation {
+				suite.Require().Error(err, "Validation passed unexpectedly")
+			} else {
+				suite.Require().NoError(err, "Validation failed unexpectedly")
+			}
+		})
+	}
+}
+
+func (suite *FunctionKubePlatformTestSuite) TestValidateSidecarContainers() {
+	sidcarContainerName := "sidecar1"
+	sidcarPortName := "sidcarPort"
+
+	for idx, testCase := range []struct {
+		name                 string
+		sidecars             []*v1.Container
+		shouldFailValidation bool
+	}{
+		{
+			name: "valid",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "validMultiple",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+				{
+					Name:  "sidecar2",
+					Image: "alpine",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          fmt.Sprintf("%s-2", sidcarPortName),
+							ContainerPort: 90,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "invalidNoName",
+			sidecars: []*v1.Container{
+				{
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidNoImage",
+			sidecars: []*v1.Container{
+				{
+					Name: sidcarContainerName,
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidNoContainerPort",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name: sidcarPortName,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidNoContainerPortName",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidDuplicateContainerPortName",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 90,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidDuplicateContainerPortNumber",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: 80,
+						},
+						{
+							Name:          "sidcarPort2",
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedHTTPPort",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: abstract.FunctionContainerHTTPPort,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedWebAdminPort",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: abstract.FunctionContainerWebAdminHTTPPort,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedHealthCheckHTTPPort",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: abstract.FunctionContainerHealthCheckHTTPPort,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedMetricPort",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          sidcarPortName,
+							ContainerPort: abstract.FunctionContainerMetricPort,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedHTTPPortName",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          abstract.FunctionContainerHTTPPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+		{
+			name: "invalidReservedMetricPortName",
+			sidecars: []*v1.Container{
+				{
+					Name:  sidcarContainerName,
+					Image: "nginx",
+					Ports: []v1.ContainerPort{
+						{
+							Name:          abstract.FunctionContainerMetricPortName,
+							ContainerPort: 80,
+						},
+					},
+				},
+			},
+			shouldFailValidation: true,
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			suite.mockedPlatform.
+				On("GetProjects", suite.ctx, &platform.GetProjectsOptions{
+					Meta: platform.ProjectMeta{
+						Name:      platform.DefaultProjectName,
+						Namespace: "default",
+					},
+				}).
+				Return([]platform.Project{
+					&platform.AbstractProject{},
+				}, nil).
+				Once()
+
+			// name it with index and shift with 65 to get A as first letter
+			functionName := string(rune(idx + 65))
+			functionConfig := *functionconfig.NewConfig()
+			functionConfig.Spec.Sidecars = testCase.sidecars
+
+			createFunctionOptions := &platform.CreateFunctionOptions{
+				Logger:         suite.Logger,
+				FunctionConfig: functionConfig,
+			}
+			createFunctionOptions.FunctionConfig.Meta.Name = functionName
+			createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
+				common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
+			}
 
 			err := suite.platform.ValidateFunctionConfig(suite.ctx, &createFunctionOptions.FunctionConfig)
 			if testCase.shouldFailValidation {
@@ -512,8 +755,7 @@ func (suite *FunctionKubePlatformTestSuite) TestFunctionTriggersEnrichmentAndVal
 				},
 			}).Return([]platform.Project{
 				&platform.AbstractProject{},
-			}, nil).Once()
-
+			}, nil).Twice()
 			// name it with index and shift with 65 to get A as first letter
 			functionName := string(rune(idx + 65))
 			functionConfig := *functionconfig.NewConfig()
@@ -525,7 +767,7 @@ func (suite *FunctionKubePlatformTestSuite) TestFunctionTriggersEnrichmentAndVal
 			createFunctionOptions.FunctionConfig.Meta.Name = functionName
 			createFunctionOptions.FunctionConfig.Meta.Namespace = suite.Namespace
 			createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
-				"nuclio.io/project-name": platform.DefaultProjectName,
+				common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
 			}
 			createFunctionOptions.FunctionConfig.Spec.Triggers = testCase.triggers
 			suite.Logger.DebugWith("Enriching and validating function", "functionName", functionName)
@@ -553,6 +795,58 @@ func (suite *FunctionKubePlatformTestSuite) TestFunctionTriggersEnrichmentAndVal
 				err := testCase.tearDownFunction()
 				suite.Require().NoError(err)
 			}
+		})
+	}
+}
+
+func (suite *FunctionKubePlatformTestSuite) TestValidateAPIGateway() {
+	for _, testCase := range []struct {
+		name           string
+		apiGatewayName string
+		namespace      string
+		expectError    bool
+	}{
+		{
+			name:           "correct-config-1",
+			apiGatewayName: "function-name",
+			namespace:      "ns",
+			expectError:    false,
+		},
+		{
+			name:           "empty-ns",
+			apiGatewayName: "function-name",
+			expectError:    true,
+		},
+		{
+			name:           "empty-name",
+			apiGatewayName: "function-name",
+			expectError:    true,
+		},
+		{
+			name:           "wrong-name-1",
+			apiGatewayName: "--2-821",
+			namespace:      "ns",
+			expectError:    true,
+		},
+		{
+			name:           "wrong-name-1",
+			apiGatewayName: "2-%-%%^1",
+			namespace:      "ns",
+			expectError:    true,
+		},
+	} {
+		suite.Run(testCase.name, func() {
+
+			err := suite.platform.validateAPIGatewayMeta(&platform.APIGatewayMeta{
+				Name:      testCase.apiGatewayName,
+				Namespace: testCase.namespace,
+			})
+			if testCase.expectError {
+				suite.Require().Error(err)
+			} else {
+				suite.Require().NoError(err)
+			}
+
 		})
 	}
 }
@@ -714,7 +1008,7 @@ func (suite *FunctionKubePlatformTestSuite) TestGetFunctionsPermissions() {
 					Namespace: suite.Namespace,
 					Name:      functionName,
 					Labels: map[string]string{
-						"nuclio.io/project-name": projectName,
+						common.NuclioResourceLabelKeyProjectName: projectName,
 					},
 				},
 			}
@@ -794,7 +1088,7 @@ func (suite *FunctionKubePlatformTestSuite) TestUpdateFunctionPermissions() {
 					Namespace: suite.Namespace,
 					Name:      functionName,
 					Labels: map[string]string{
-						"nuclio.io/project-name": projectName,
+						common.NuclioResourceLabelKeyProjectName: projectName,
 					},
 				},
 				Status: functionconfig.Status{
@@ -891,7 +1185,7 @@ func (suite *FunctionKubePlatformTestSuite) TestDeleteFunctionPermissions() {
 						Namespace: suite.Namespace,
 						Name:      functionName,
 						Labels: map[string]string{
-							"nuclio.io/project-name": projectName,
+							common.NuclioResourceLabelKeyProjectName: projectName,
 						},
 					},
 				},
@@ -1008,14 +1302,14 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 				Attributes: map[string]interface{}{
 					"ingresses": map[string]interface{}{
 						"0": map[string]interface{}{
-							"hostTemplate": "@nuclio.fromDefault",
+							"hostTemplate": common.DefaultIngressHostTemplate,
 						},
 					},
 				},
 			},
 			want: map[string]interface{}{
 				"0": map[string]interface{}{
-					"hostTemplate": "@nuclio.fromDefault",
+					"hostTemplate": common.DefaultIngressHostTemplate,
 					"host":         "some-name.some-namespace.test.com",
 					"pathType":     networkingv1.PathTypeImplementationSpecific,
 				},
@@ -1029,7 +1323,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 				Attributes: map[string]interface{}{
 					"ingresses": map[string]interface{}{
 						"0": map[string]interface{}{
-							"hostTemplate": "@nuclio.fromDefault",
+							"hostTemplate": common.DefaultIngressHostTemplate,
 						},
 						"1": map[string]interface{}{
 							"host": "leave-it-as.is.com",
@@ -1039,7 +1333,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 			},
 			want: map[string]interface{}{
 				"0": map[string]interface{}{
-					"hostTemplate": "@nuclio.fromDefault",
+					"hostTemplate": common.DefaultIngressHostTemplate,
 					"host":         "some-name.some-namespace.test.com",
 					"pathType":     networkingv1.PathTypeImplementationSpecific,
 				},
@@ -1057,7 +1351,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 				Attributes: map[string]interface{}{
 					"ingresses": map[string]interface{}{
 						"0": map[string]interface{}{
-							"hostTemplate": "@nuclio.fromDefault",
+							"hostTemplate": common.DefaultIngressHostTemplate,
 							"host":         "",
 						},
 					},
@@ -1065,7 +1359,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 			},
 			want: map[string]interface{}{
 				"0": map[string]interface{}{
-					"hostTemplate": "@nuclio.fromDefault",
+					"hostTemplate": common.DefaultIngressHostTemplate,
 					"host":         "some-name.some-namespace.test.com",
 					"pathType":     networkingv1.PathTypeImplementationSpecific,
 				},
@@ -1079,7 +1373,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 				Attributes: map[string]interface{}{
 					"ingresses": map[string]interface{}{
 						"0": map[string]interface{}{
-							"hostTemplate": "@nuclio.fromDefault",
+							"hostTemplate": common.DefaultIngressHostTemplate,
 							"host":         "dont-override-me.com",
 						},
 					},
@@ -1087,7 +1381,7 @@ func (suite *FunctionKubePlatformTestSuite) TestRenderFunctionIngress() {
 			},
 			want: map[string]interface{}{
 				"0": map[string]interface{}{
-					"hostTemplate": "@nuclio.fromDefault",
+					"hostTemplate": common.DefaultIngressHostTemplate,
 					"host":         "dont-override-me.com",
 					"pathType":     networkingv1.PathTypeImplementationSpecific,
 				},
@@ -1374,6 +1668,17 @@ func (suite *FunctionKubePlatformTestSuite) TestEnrichFunctionWithUserNameLabel(
 
 	// inject auth session to context
 	ctx := context.WithValue(suite.ctx, auth.AuthSessionContextKey, authSession)
+	suite.mockedPlatform.
+		On("GetProjects", ctx, &platform.GetProjectsOptions{
+			Meta: platform.ProjectMeta{
+				Name:      platform.DefaultProjectName,
+				Namespace: suite.Namespace,
+			},
+		}).
+		Return([]platform.Project{
+			&platform.AbstractProject{},
+		}, nil).
+		Once()
 
 	createFunctionOptions := &platform.CreateFunctionOptions{
 		Logger:         suite.Logger,
@@ -1381,8 +1686,9 @@ func (suite *FunctionKubePlatformTestSuite) TestEnrichFunctionWithUserNameLabel(
 		AuthSession:    authSession,
 	}
 	createFunctionOptions.FunctionConfig.Meta.Name = functionName
+	createFunctionOptions.FunctionConfig.Meta.Namespace = suite.Namespace
 	createFunctionOptions.FunctionConfig.Meta.Labels = map[string]string{
-		"nuclio.io/project-name": platform.DefaultProjectName,
+		common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
 	}
 
 	suite.Logger.DebugWith("Enriching function", "functionName", functionName)
@@ -1390,7 +1696,65 @@ func (suite *FunctionKubePlatformTestSuite) TestEnrichFunctionWithUserNameLabel(
 	err := suite.platform.EnrichFunctionConfig(ctx, &createFunctionOptions.FunctionConfig)
 	suite.Require().NoError(err)
 
-	suite.Require().Equal("some-user", createFunctionOptions.FunctionConfig.Meta.Labels[iguazio.IguzioUsernameLabel])
+	suite.Require().Equal("some-user", createFunctionOptions.FunctionConfig.Meta.Labels[iguazio.IguazioUsernameLabel])
+}
+
+func (suite *FunctionKubePlatformTestSuite) TestUsernameLabelsEnrichment() {
+	for _, testCase := range []struct {
+		name                  string
+		fullUsername          string
+		expectedUsernameLabel string
+		expectedDomainLabel   string
+	}{
+		{
+			name:                  "with-name-and-domain",
+			fullUsername:          "foo@bar.com",
+			expectedUsernameLabel: "foo",
+			expectedDomainLabel:   "bar.com",
+		},
+		{
+			name:                  "with-only-name",
+			fullUsername:          "foo",
+			expectedUsernameLabel: "foo",
+		},
+		{
+			name: "empty",
+		},
+		// test cases to check that we don't panic on wrong usernames
+		{
+			name:                  "wrong-with-two-ats",
+			fullUsername:          "foo@bar@test",
+			expectedUsernameLabel: "foo",
+			expectedDomainLabel:   "bar",
+		},
+		{
+			name:                  "wrong-with-empty-domain",
+			fullUsername:          "foo@",
+			expectedUsernameLabel: "foo",
+		},
+		{
+			name:                "wrong-with-empty-name",
+			fullUsername:        "@bar",
+			expectedDomainLabel: "bar",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			testContext := context.WithValue(suite.ctx,
+				auth.AuthSessionContextKey,
+				&auth.IguazioSession{
+					Username: testCase.fullUsername,
+				},
+			)
+			labels := make(map[string]string)
+			suite.platform.EnrichLabels(testContext, labels)
+
+			usernameLabel := labels[iguazio.IguazioUsernameLabel]
+			suite.Require().Equal(testCase.expectedUsernameLabel, usernameLabel)
+
+			domainLabel := labels[iguazio.IguazioDomainLabel]
+			suite.Require().Equal(testCase.expectedDomainLabel, domainLabel)
+		})
+	}
 }
 
 type FunctionEventKubePlatformTestSuite struct {
@@ -1441,8 +1805,8 @@ func (suite *FunctionEventKubePlatformTestSuite) TestGetFunctionEventsPermission
 					Namespace: suite.Namespace,
 					Name:      functionEventName,
 					Labels: map[string]string{
-						"nuclio.io/function-name": functionName,
-						"nuclio.io/project-name":  projectName,
+						common.NuclioResourceLabelKeyFunctionName: functionName,
+						common.NuclioResourceLabelKeyProjectName:  projectName,
 					},
 				},
 			}
@@ -1525,8 +1889,8 @@ func (suite *FunctionEventKubePlatformTestSuite) TestUpdateFunctionEventPermissi
 					Namespace: suite.Namespace,
 					Name:      functionEventName,
 					Labels: map[string]string{
-						"nuclio.io/function-name": functionName,
-						"nuclio.io/project-name":  projectName,
+						common.NuclioResourceLabelKeyFunctionName: functionName,
+						common.NuclioResourceLabelKeyProjectName:  projectName,
 					},
 				},
 			}
@@ -1580,8 +1944,8 @@ func (suite *FunctionEventKubePlatformTestSuite) TestUpdateFunctionEventPermissi
 						Name:      functionEventName,
 						Namespace: suite.Namespace,
 						Labels: map[string]string{
-							"nuclio.io/function-name": functionName,
-							"nuclio.io/project-name":  functionName,
+							common.NuclioResourceLabelKeyFunctionName: functionName,
+							common.NuclioResourceLabelKeyProjectName:  functionName,
 						},
 					},
 					Spec: platform.FunctionEventSpec{},
@@ -1626,8 +1990,8 @@ func (suite *FunctionEventKubePlatformTestSuite) TestDeleteFunctionEventPermissi
 					Namespace: suite.Namespace,
 					Name:      functionEventName,
 					Labels: map[string]string{
-						"nuclio.io/function-name": functionName,
-						"nuclio.io/project-name":  projectName,
+						common.NuclioResourceLabelKeyFunctionName: functionName,
+						common.NuclioResourceLabelKeyProjectName:  projectName,
 					},
 				},
 			}
@@ -1694,6 +2058,13 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 		On("List", suite.ctx, metav1.ListOptions{}).
 		Return(&v1beta1.NuclioAPIGatewayList{}, nil)
 
+	// set the template for api gateway host generation
+	suite.platform.GetConfig().Kube.DefaultHTTPIngressHostTemplate = "{{ .ResourceName }}.{{ .Namespace }}.app.dev.com"
+	defer func() {
+		// unset the template for api gateway host generation
+		suite.platform.GetConfig().Kube.DefaultHTTPIngressHostTemplate = ""
+	}()
+
 	for _, testCase := range []struct {
 		name             string
 		setUpFunction    func() error
@@ -1731,6 +2102,19 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 			}(),
 		},
 		{
+			name: "HostEnriched",
+			apiGatewayConfig: func() *platform.APIGatewayConfig {
+				apiGatewayConfig := suite.compileAPIGatewayConfig()
+				apiGatewayConfig.Spec.Host = ""
+				return &apiGatewayConfig
+			}(),
+			expectedEnrichedAPIGateway: func() *platform.APIGatewayConfig {
+				apiGatewayConfig := suite.compileAPIGatewayConfig()
+				apiGatewayConfig.Spec.Host = "default-name.default-namespace.app.dev.com"
+				return &apiGatewayConfig
+			}(),
+		},
+		{
 			name: "MetaNameEnrichedFromSpecName",
 			apiGatewayConfig: func() *platform.APIGatewayConfig {
 				apiGatewayConfig := suite.compileAPIGatewayConfig()
@@ -1754,7 +2138,7 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 			expectedEnrichedAPIGateway: func() *platform.APIGatewayConfig {
 				apiGatewayConfig := suite.compileAPIGatewayConfig()
 				apiGatewayConfig.Meta.Labels = map[string]string{
-					iguazio.IguzioUsernameLabel: "some-username",
+					iguazio.IguazioUsernameLabel: "some-username",
 				}
 				return &apiGatewayConfig
 			}(),
@@ -1819,15 +2203,6 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 				return &apiGatewayConfig
 			}(),
 			validationError: "One or more upstreams must be provided in spec",
-		},
-		{
-			name: "ValidateHostExistence",
-			apiGatewayConfig: func() *platform.APIGatewayConfig {
-				apiGatewayConfig := suite.compileAPIGatewayConfig()
-				apiGatewayConfig.Spec.Host = ""
-				return &apiGatewayConfig
-			}(),
-			validationError: "Host must be provided in spec",
 		},
 		{
 			name: "ValidateUpstreamKind",
@@ -1950,7 +2325,7 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 			apiGatewayConfig: func() *platform.APIGatewayConfig {
 				apiGatewayConfig := suite.compileAPIGatewayConfig()
 				apiGatewayConfig.Spec.Host = "this-host-and-path-are-used.com"
-				apiGatewayConfig.Spec.Path = "//same-path"
+				apiGatewayConfig.Spec.Path = "/same-path"
 				return &apiGatewayConfig
 			}(),
 		},
@@ -1988,7 +2363,7 @@ func (suite *APIGatewayKubePlatformTestSuite) TestAPIGatewayEnrichmentAndValidat
 			apiGatewayConfig: func() *platform.APIGatewayConfig {
 				apiGatewayConfig := suite.compileAPIGatewayConfig()
 				apiGatewayConfig.Spec.Host = "this-host-and-path-are-used.com"
-				apiGatewayConfig.Spec.Path = "//same-path"
+				apiGatewayConfig.Spec.Path = "/same-path"
 				return &apiGatewayConfig
 			}(),
 			validationError: platform.ErrIngressHostPathInUse.Error(),

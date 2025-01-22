@@ -1,8 +1,10 @@
-# kinesis: Kinesis Trigger
+# Kinesis trigger
+
+> **NOTE:**  Kinesis trigger is in tech-preview.
 
 Reads records from [Amazon Kinesis](https://aws.amazon.com/kinesis/) streams.
 
-**In This Document**
+## In this document
 - [Attributes](#attributes)
 - [Example](#example)
 - [IAM Configuration](#iam-configuration)
@@ -30,6 +32,9 @@ triggers:
       streamName: "my-stream"
       shards: [shard-0, shard-1, shard-2]
 ```
+> **Note:** If Kinesis is configured with On-Demand capacity mode, the shard ids should be set as:<br>
+            `[shardId-000000000000,shardId-000000000001,shardId-000000000002,...]`
+
 
 ### IAM Configuration
 

@@ -1,7 +1,7 @@
 //go:build function_templates_generator
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,15 +32,14 @@ import (
 	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/dashboard/functiontemplates"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
-	"github.com/nuclio/nuclio/pkg/processor/build"
 	"github.com/nuclio/nuclio/pkg/processor/build/inlineparser"
 
-	"github.com/ghodss/yaml"
 	"github.com/gobuffalo/flect"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
-	"github.com/nuclio/zap"
+	nucliozap "github.com/nuclio/zap"
 	yamlv3 "gopkg.in/yaml.v3"
+	"sigs.k8s.io/yaml"
 )
 
 var funcMap = template.FuncMap{
@@ -82,7 +81,7 @@ package functiontemplates
 import (
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 )
 
 var GeneratedFunctionTemplates = []*generatedFunctionTemplate{
@@ -216,7 +215,7 @@ func (g *Generator) isFunctionDir(runtime *Runtime, functionDirFiles []os.DirEnt
 	for _, file := range functionDirFiles {
 
 		// directory has at least one file related to function's runtime or a function.yaml
-		if strings.HasSuffix(file.Name(), runtime.FileExtension) || file.Name() == build.FunctionConfigFileName {
+		if strings.HasSuffix(file.Name(), runtime.FileExtension) || file.Name() == common.FunctionConfigFileName {
 			return true
 		}
 	}
@@ -257,14 +256,14 @@ func (g *Generator) buildFunctionTemplates(functionDirs []string) ([]*functionte
 			"runtime", configuration.Spec.Runtime)
 		functionTemplates = append(functionTemplates, functionTemplate)
 
-		// HACK: allow python 3.6, 3.7, 3.8, 3.9 share the same functions to avoid specific examples per runtime version
+		// HACK: allow python 3.7, 3.8, 3.9, 3.10, 3.11 share the same functions to avoid specific examples per runtime version
 		runtimeName, runtimeVersion := common.GetRuntimeNameAndVersion(configuration.Spec.Runtime)
 		if runtimeName == "python" &&
-			runtimeVersion == "3.6" &&
+			runtimeVersion == "3.9" &&
 			functionName == "helloworld" {
 
 			// add helloworld function example to python 3.7+
-			for _, runtimeCopy := range []string{"python:3.7", "python:3.8", "python:3.9"} {
+			for _, runtimeCopy := range []string{"python:3.9", "python:3.10", "python:3.11"} {
 				configurationCopy := *configuration
 				configurationCopy.Spec.Runtime = runtimeCopy
 
@@ -317,7 +316,7 @@ func (g *Generator) getFunctionConfigAndSource(functionDir string) (*functioncon
 	configFileExists := false
 
 	// first, look for a function.yaml file. parse it if found
-	configPath := filepath.Join(functionDir, build.FunctionConfigFileName)
+	configPath := filepath.Join(functionDir, common.FunctionConfigFileName)
 
 	if common.IsFile(configPath) {
 		configFileExists = true
@@ -340,12 +339,12 @@ func (g *Generator) getFunctionConfigAndSource(functionDir string) (*functioncon
 	}
 
 	for _, file := range files {
-		if file.Name() != build.FunctionConfigFileName {
+		if file.Name() != common.FunctionConfigFileName {
 
 			// we found our source code, read it
 			sourcePath := filepath.Join(functionDir, file.Name())
 
-			sourceBytes, err := os.ReadFile(sourcePath)
+			sourceBytes, err := os.ReadFile(filepath.Clean(sourcePath))
 			if err != nil {
 				return nil, "", errors.Wrapf(err, "Failed to read function source code at %s", sourcePath)
 			}
@@ -400,7 +399,7 @@ func (g *Generator) parseInlineConfiguration(sourcePath string,
 		return nil
 	}
 
-	unmarshalledInlineConfigYAML, found := configureBlock.Contents[build.FunctionConfigFileName]
+	unmarshalledInlineConfigYAML, found := configureBlock.Contents[common.FunctionConfigFileName]
 	if !found {
 		return errors.Errorf("No function.yaml file found inside configure block at %s", sourcePath)
 	}

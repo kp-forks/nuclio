@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,7 +45,8 @@ func RenderFunctions(ctx context.Context,
 	functions []platform.Function,
 	format string,
 	writer io.Writer,
-	renderCallback func(functions []platform.Function, renderer func(interface{}) error) error) error {
+	renderCallback func(functions []platform.Function, renderer func(interface{}) error, exportOptions *common.ExportFunctionOptions) error,
+	exportOptions *common.ExportFunctionOptions) error {
 
 	errGroup, errGroupCtx := errgroup.WithContext(ctx, logger)
 	var renderNodePort bool
@@ -72,26 +73,26 @@ func RenderFunctions(ctx context.Context,
 
 	switch format {
 	case OutputFormatText, OutputFormatWide:
-		header := []string{"Namespace", "Name", "Project", "State", "Replicas"}
+		header := []interface{}{"Namespace", "Name", "Project", "State", "Replicas"}
 		if renderNodePort {
 			header = append(header, "Node Port")
 		}
 		if format == OutputFormatWide {
-			header = append(header, []string{
+			header = append(header, []interface{}{
 				"Labels",
 				"Internal Invocation URL",
 				"External Invocation URLs",
 			}...)
 		}
 
-		var functionRecords [][]string
+		var functionRecords [][]interface{}
 
 		// for each field
 		for _, function := range functions {
 			availableReplicas, specifiedReplicas := function.GetReplicas()
 
 			// get its fields
-			functionFields := []string{
+			functionFields := []interface{}{
 				function.GetConfig().Meta.Namespace,
 				function.GetConfig().Meta.Name,
 				function.GetConfig().Meta.Labels[common.NuclioResourceLabelKeyProjectName],
@@ -110,7 +111,7 @@ func RenderFunctions(ctx context.Context,
 
 			// add fields for wide view
 			if format == OutputFormatWide {
-				functionFields = append(functionFields, []string{
+				functionFields = append(functionFields, []interface{}{
 					common.StringMapToString(function.GetConfig().Meta.Labels),
 					strings.Join(function.GetStatus().InternalInvocationURLs, ", "),
 					strings.Join(function.GetStatus().ExternalInvocationURLs, ", "),
@@ -123,9 +124,9 @@ func RenderFunctions(ctx context.Context,
 
 		rendererInstance.RenderTable(header, functionRecords)
 	case OutputFormatYAML:
-		return renderCallback(functions, rendererInstance.RenderYAML)
+		return renderCallback(functions, rendererInstance.RenderYAML, exportOptions)
 	case OutputFormatJSON:
-		return renderCallback(functions, rendererInstance.RenderJSON)
+		return renderCallback(functions, rendererInstance.RenderJSON, exportOptions)
 	}
 
 	return nil
@@ -140,31 +141,31 @@ func RenderFunctionEvents(functionEvents []platform.FunctionEvent,
 
 	switch format {
 	case OutputFormatText, OutputFormatWide:
-		header := []string{"Namespace", "Name", "Display Name", "Function", "Trigger Name", "Trigger Kind"}
+		header := []interface{}{"Namespace", "Name", "Display Name", "Function", "Trigger Name", "Trigger Kind"}
 		if format == OutputFormatWide {
-			header = append(header, []string{
+			header = append(header, []interface{}{
 				"Body",
 			}...)
 		}
 
-		var functionEventRecords [][]string
+		var functionEventRecords [][]interface{}
 
 		// for each field
 		for _, functionEvent := range functionEvents {
 
 			// get its fields
-			functionEventFields := []string{
+			functionEventFields := []interface{}{
 				functionEvent.GetConfig().Meta.Namespace,
 				functionEvent.GetConfig().Meta.Name,
 				functionEvent.GetConfig().Spec.DisplayName,
-				functionEvent.GetConfig().Meta.Labels["nuclio.io/function-name"],
+				functionEvent.GetConfig().Meta.Labels[common.NuclioResourceLabelKeyFunctionName],
 				functionEvent.GetConfig().Spec.TriggerName,
 				functionEvent.GetConfig().Spec.TriggerKind,
 			}
 
 			// add fields for wide view
 			if format == OutputFormatWide {
-				functionEventFields = append(functionEventFields, []string{
+				functionEventFields = append(functionEventFields, []interface{}{
 					functionEvent.GetConfig().Spec.Body,
 				}...)
 			}
@@ -187,34 +188,36 @@ func RenderProjects(ctx context.Context,
 	projects []platform.Project,
 	format string,
 	writer io.Writer,
-	renderCallback func(ctx context.Context, functions []platform.Project, renderer func(interface{}) error) error) error {
+	renderCallback func(ctx context.Context, functions []platform.Project, renderer func(interface{}) error) error,
+	skipSpecCleanup bool) error {
 
 	rendererInstance := renderer.NewRenderer(writer)
 
 	switch format {
 	case OutputFormatText, OutputFormatWide:
-		header := []string{"Namespace", "Name"}
+		header := []interface{}{"Namespace", "Name"}
 		if format == OutputFormatWide {
-			header = append(header, []string{
+			header = append(header, []interface{}{
 				"Description",
 				"Owner",
+				"DefaultFunctionNodeSelector",
 			}...)
 		}
 
-		var projectRecords [][]string
+		var projectRecords [][]interface{}
 
 		// for each field
 		for _, project := range projects {
 
 			// get its fields
-			projectFields := []string{
+			projectFields := []interface{}{
 				project.GetConfig().Meta.Namespace,
 				project.GetConfig().Meta.Name,
 			}
 
 			// add fields for wide view
 			if format == OutputFormatWide {
-				projectFields = append(projectFields, []string{
+				projectFields = append(projectFields, []interface{}{
 					project.GetConfig().Spec.Description,
 					project.GetConfig().Spec.Owner,
 				}...)
@@ -243,14 +246,14 @@ func RenderAPIGateways(apiGateways []platform.APIGateway,
 
 	switch format {
 	case OutputFormatText, OutputFormatWide:
-		header := []string{"Namespace", "Name", "Host", "Path", "Primary", "Canary", "Percentage"}
+		header := []interface{}{"Namespace", "Name", "Host", "Path", "Primary", "Canary", "Percentage"}
 		if format == OutputFormatWide {
-			header = append(header, []string{
+			header = append(header, []interface{}{
 				"Body",
 			}...)
 		}
 
-		var apiGatewayRecords [][]string
+		var apiGatewayRecords [][]interface{}
 
 		// for each field
 		for _, apiGateway := range apiGateways {
@@ -267,7 +270,7 @@ func RenderAPIGateways(apiGateways []platform.APIGateway,
 			}
 
 			// get its fields
-			apiGatewayFields := []string{
+			apiGatewayFields := []interface{}{
 				apiGateway.GetConfig().Meta.Namespace,
 				apiGateway.GetConfig().Meta.Name,
 				apiGateway.GetConfig().Spec.Host,
@@ -279,7 +282,7 @@ func RenderAPIGateways(apiGateways []platform.APIGateway,
 
 			// add fields for wide view
 			if format == OutputFormatWide {
-				apiGatewayFields = append(apiGatewayFields, []string{
+				apiGatewayFields = append(apiGatewayFields, []interface{}{
 					apiGateway.GetConfig().Spec.Description,
 				}...)
 			}

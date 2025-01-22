@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -143,6 +143,9 @@ func (r *Release) Run() error {
 }
 
 func (r *Release) compileRepositoryURL(scheme string) string {
+	if scheme == "git" {
+		return fmt.Sprintf("git@github.com:%s/nuclio", r.repositoryOwnerName)
+	}
 	return fmt.Sprintf("%s://github.com/%s/nuclio", scheme, r.repositoryOwnerName)
 }
 
@@ -391,40 +394,6 @@ func (r *Release) getGithubWorkflowsReleaseStatus() (string, error) {
 	return status, nil
 }
 
-func (r *Release) getTravisReleaseStatus() (string, error) {
-	travisBuildsURL := fmt.Sprintf("%s/repos/nuclio/%s/builds", travisAPIURL, r.repositoryOwnerName)
-	request, err := http.NewRequest(http.MethodGet, travisBuildsURL, nil)
-	if err != nil {
-		return "", errors.Wrap(err, "Failed to create new request")
-	}
-	request.Header.Set("Content-Type", "application/vnd.travis-ci.2.1+json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return "", errors.Wrap(err, "Failed to perform request")
-	}
-	responseBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return "", errors.Wrap(err, "Failed to read all response body")
-	}
-
-	type Build struct {
-		Branch string `json:"branch,omitempty"`
-		State  string `json:"state,omitempty"`
-	}
-	var BuildsResponse []Build
-	if err := json.Unmarshal(responseBody, &BuildsResponse); err != nil {
-		return "", errors.Wrap(err, "Failed to unmarshal builds response")
-	}
-	releaseBuildState := ""
-	for _, buildResponse := range BuildsResponse {
-		if buildResponse.Branch == r.targetVersion.String() {
-			releaseBuildState = buildResponse.State
-			break
-		}
-	}
-	return releaseBuildState, nil
-}
-
 func (r *Release) compileGithubAPIURL() string {
 	return fmt.Sprintf("%s/repos/%s/nuclio", githubAPIURL, r.repositoryOwnerName)
 }
@@ -610,6 +579,10 @@ Once re-run, it will catch up here.`)
 }
 
 func (r *Release) bumpHelmChartVersion() error {
+	r.logger.DebugWith("Bumping helm chart version",
+		"targetVersion", r.targetVersion,
+		"helmChartsTargetVersion", r.helmChartsTargetVersion)
+
 	runOptions := &cmdrunner.RunOptions{
 		WorkingDir: &r.repositoryDirPath,
 	}
@@ -620,15 +593,13 @@ func (r *Release) bumpHelmChartVersion() error {
 		r.releaseBranch); err != nil {
 		return errors.Wrap(err, "Failed to checkout to release branch")
 	}
-	for _, chartDir := range r.resolveSupportedChartDirs() {
-		if _, err := r.cmdRunner.Run(runOptions,
-			`git grep -lF "%s" %s | grep yaml | xargs sed -i '' -e "s/%s/%s/g"`,
-			r.helmChartConfig.AppVersion,
-			path.Join("hack", chartDir),
-			r.helmChartConfig.AppVersion,
-			r.targetVersion); err != nil {
-			return errors.Wrap(err, "Failed to update target versions")
-		}
+	if _, err := r.cmdRunner.Run(runOptions,
+		`git grep -lF "%s" %s | grep yaml | xargs sed -i '' -e "s/%s/%s/g"`,
+		r.helmChartConfig.AppVersion,
+		path.Join("hack", "k8s"),
+		r.helmChartConfig.AppVersion,
+		r.targetVersion); err != nil {
+		return errors.Wrap(err, "Failed to update target version")
 	}
 
 	// explicitly bump the app version
@@ -818,14 +789,6 @@ func (r *Release) bumpVersion(version *semver.Version) {
 	}
 }
 
-func (r *Release) resolveSupportedChartDirs() []string {
-	return []string{
-		"k8s",
-		"gke",
-		"aks",
-	}
-}
-
 func run() error {
 	loggerInstance, err := nucliozap.NewNuclioZapCmd("releaser",
 		nucliozap.DebugLevel,
@@ -845,7 +808,7 @@ func run() error {
 	flag.Var(release.helmChartsTargetVersion, "helm-charts-release-version", "Helm charts release target version")
 	flag.StringVar(&release.githubToken, "github-token", common.GetEnvOrDefaultString("NUCLIO_RELEASER_GITHUB_TOKEN", ""), "A scope-less Github token header to avoid API rate limit")
 	flag.StringVar(&release.repositoryOwnerName, "repository-owner-name", "nuclio", "Repository owner name to clone nuclio from (Default: nuclio)")
-	flag.StringVar(&release.repositoryScheme, "repository-scheme", "https", "Scheme to use when cloning nuclio repository")
+	flag.StringVar(&release.repositoryScheme, "repository-scheme", "git", "Scheme to use when cloning nuclio repository")
 	flag.StringVar(&release.developmentBranch, "development-branch", "development", "Development branch (e.g.: development, 1.3.x")
 	flag.StringVar(&release.releaseBranch, "release-branch", "master", "Release branch (e.g.: master, 1.3.x, ...)")
 	flag.BoolVar(&release.skipCreateRelease, "skip-create-release", false, "Skip build & release flow (useful when publishing helm charts only)")

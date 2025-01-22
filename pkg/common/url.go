@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,12 @@ package common
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
-	"time"
 
 	"github.com/nuclio/errors"
 	"github.com/nuclio/nuclio-sdk-go"
@@ -36,7 +35,10 @@ const (
 	HTTPPrefix      = "http://"
 	HTTPSPrefix     = "https://"
 	LocalFilePrefix = "file://"
+	urlPathRegex    = `^([\/]?([a-zA-Z0-9\-_]+[\/]?)*|)$`
 )
+
+var URLPathRegexpCompiled = regexp.MustCompile(urlPathRegex)
 
 func DownloadFile(url string, out *os.File, headers http.Header) error {
 	client := http.Client{}
@@ -114,6 +116,11 @@ func NormalizeURLPath(p string) string {
 	return string(res)
 }
 
+// ValidateURLPath validates only path of url (without host)
+func ValidateURLPath(path string) bool {
+	return URLPathRegexpCompiled.MatchString(path)
+}
+
 // SendHTTPRequest Sends an HTTP request using custom http client
 // ignore expectedStatusCode by setting it to 0
 func SendHTTPRequest(httpClient *http.Client,
@@ -160,15 +167,6 @@ func sendHTTPRequest(ctx context.Context,
 	headers map[string]string,
 	cookies []*http.Cookie,
 	expectedStatusCode int) ([]byte, *http.Response, error) {
-
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-	}
 
 	// create request object
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewBuffer(body))

@@ -1,6 +1,8 @@
-# Java reference
+# Java
 
 This document describes specific Java build and deploy configurations.
+
+> **NOTE:**  Java runtime is in tech-preview.
 
 #### In this document
 
@@ -105,7 +107,7 @@ Providing a **build.gradle** file inside the function directory or archive overr
 
 ## Dockerfile
 
-See [Deploying Functions from a Dockerfile](/docs/tasks/deploy-functions-from-dockerfile.md).
+See [Deploying Functions from a Dockerfile](../../../tasks/deploy-functions-from-dockerfile.md).
 
 ```
 ARG NUCLIO_LABEL=0.5.6

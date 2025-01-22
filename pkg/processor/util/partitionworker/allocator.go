@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ type Allocator interface {
 	Stop() error
 }
 
-// holds a shared pool of workers for all partitions to use. cannot guarantee that single worker will always
+// PooledWorkerAllocator holds a shared pool of workers for all partitions to use. cannot guarantee that single worker will always
 // be used to handle the same partition but offers the best throughput since all partitions of a given topic
 // share the same pool of workers
 type PooledWorkerAllocator struct {
@@ -73,9 +73,10 @@ func (wa *PooledWorkerAllocator) Stop() error {
 	return nil
 }
 
-// statically maps a given partition to a given. this guarantees that a given partition in a given topic will
-// *always* be handled by the same worker of this replica. for functions that benefit from holding in-order state
-// this will be useful. however, the cost is throughput - it segments the worker pool such that it's possible
+// StaticWorkerAllocator statically maps a given partition to a given worker.
+// this guarantees that a given partition in a given topic will *always* be handled by the same worker of this replica.
+// for functions that benefit from holding in-order state this will be useful.
+// however, the cost is throughput - it segments the worker pool such that it's possible
 // that a partition mapped to a busy worker will wait processing an event even though there are free workers (which
 // are mapped to other partitions)
 type StaticWorkerAllocator struct {
@@ -101,7 +102,9 @@ func NewStaticWorkerAllocator(parentLogger logger.Logger,
 
 	// given a worker allocator and a topic/partition map - divide the workers we have between all partitions across
 	// all topics. there will be most likely many partitions across different topics sharing the same worker
-	newStaticWorkerAllocator.workerChans, newStaticWorkerAllocator.topicPartitionWorkers, err = newStaticWorkerAllocator.assignTopicPartitionWorkers(newStaticWorkerAllocator.workerAllocator,
+	newStaticWorkerAllocator.workerChans,
+		newStaticWorkerAllocator.topicPartitionWorkers,
+		err = newStaticWorkerAllocator.assignTopicPartitionWorkers(newStaticWorkerAllocator.workerAllocator,
 		topicPartitionIDs)
 
 	if err != nil {
@@ -116,6 +119,10 @@ func NewStaticWorkerAllocator(parentLogger logger.Logger,
 func (wa *StaticWorkerAllocator) AllocateWorker(topic string,
 	partitionID int,
 	timeout *time.Duration) (*worker.Worker, interface{}, error) {
+
+	if wa.workerAllocator.IsTerminated() {
+		return nil, nil, worker.ErrAllWorkersAreTerminated
+	}
 
 	// get the channel from which we need to allocate
 	workerChan, workerChanFound := wa.topicPartitionWorkers[topic][partitionID]
@@ -179,7 +186,7 @@ func (wa *StaticWorkerAllocator) Stop() error {
 		wa.workerAllocator.Release(workerInstance)
 	}
 
-	wa.logger.Debug("Workers released back to worker allocator", "num", len(wa.workerChans))
+	wa.logger.DebugWith("Workers released back to worker allocator", "num", len(wa.workerChans))
 
 	return nil
 }
@@ -190,13 +197,14 @@ func (wa *StaticWorkerAllocator) assignTopicPartitionWorkers(workerAllocator wor
 	var workerChans []chan *worker.Worker
 	topicPartitionWorkers := map[string]map[int]chan *worker.Worker{}
 
-	wa.logger.DebugWith("Assigning topic partition workers", "topicPartitionIDs", topicPartitionIDs)
+	wa.logger.DebugWith("Assigning topic partition workers",
+		"topicPartitionIDs", topicPartitionIDs)
 
 	// allocate as many workers as we can from the worker pool, shove each one into a buffered channel that
 	// can only contain one item and add that to a slice
 	for {
 		workerInstance, err := workerAllocator.Allocate(0)
-		if err == worker.ErrNoAvailableWorkers {
+		if errors.Is(err, worker.ErrNoAvailableWorkers) {
 			break
 		}
 
@@ -211,7 +219,9 @@ func (wa *StaticWorkerAllocator) assignTopicPartitionWorkers(workerAllocator wor
 		return nil, nil, errors.New("No workers available in worker pool")
 	}
 
-	wa.logger.DebugWith("Assigning workers to partition topics", "numWorkers", len(workerChans), "topicPartitionIDs", topicPartitionIDs)
+	wa.logger.DebugWith("Assigning workers to partition topics",
+		"numWorkers", len(workerChans),
+		"topicPartitionIDs", topicPartitionIDs)
 
 	for topic, topicPartitionIDs := range topicPartitionIDs {
 		topicPartitionWorkers[topic] = map[int]chan *worker.Worker{}

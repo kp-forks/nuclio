@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ const events = require('events')
 
 const jsonCtype = 'application/json'
 const initContextFunctionName = 'initContext'
+const isValidPathRegex = /^[a-zA-Z0-9_\-/.\\]+$/
 
 const messageTypes = {
     LOG: 'l',
@@ -250,6 +251,9 @@ async function findFunction(functionModule, name) {
 }
 
 function run(socketPath, handlerPath, handlerName) {
+    if (!isValidPathRegex.test(handlerPath)) {
+        throw `Invalid handler path: ${handlerPath}`
+    }
     const functionModule = require(handlerPath)
     return findFunction(functionModule, handlerName)
         .then(async handlerFunction => {

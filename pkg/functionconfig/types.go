@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,13 +20,15 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
 
+	"github.com/nuclio/errors"
 	"github.com/v3io/scaler/pkg/scalertypes"
 	appsv1 "k8s.io/api/apps/v1"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -65,29 +67,86 @@ type Volume struct {
 
 // Trigger holds configuration for a trigger
 type Trigger struct {
-	Class                                 string            `json:"class"`
-	Kind                                  string            `json:"kind"`
-	Name                                  string            `json:"name"`
-	Disabled                              bool              `json:"disabled,omitempty"`
-	MaxWorkers                            int               `json:"maxWorkers,omitempty"`
-	URL                                   string            `json:"url,omitempty"`
-	Paths                                 []string          `json:"paths,omitempty"`
-	Username                              string            `json:"username,omitempty"`
-	Password                              string            `json:"password,omitempty"`
-	Secret                                string            `json:"secret,omitempty"`
-	Partitions                            []Partition       `json:"partitions,omitempty"`
-	Annotations                           map[string]string `json:"annotations,omitempty"`
-	WorkerAvailabilityTimeoutMilliseconds *int              `json:"workerAvailabilityTimeoutMilliseconds,omitempty"`
-	WorkerAllocatorName                   string            `json:"workerAllocatorName,omitempty"`
-	ExplicitAckMode                       ExplicitAckMode   `json:"explicitAckMode,omitempty"`
-	WorkerTerminationTimeout              string            `json:"workerTerminationTimeout,omitempty"`
+	Class       string            `json:"class"`
+	Kind        string            `json:"kind"`
+	Name        string            `json:"name"`
+	Disabled    bool              `json:"disabled,omitempty"`
+	NumWorkers  int               `json:"numWorkers,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Paths       []string          `json:"paths,omitempty"`
+	Username    string            `json:"username,omitempty"`
+	Password    string            `json:"password,omitempty"`
+	Secret      string            `json:"secret,omitempty"`
+	Partitions  []Partition       `json:"partitions,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 
+	// TODO: move all these params to attributes for kafka trigger
+	WorkerTerminationTimeout              string          `json:"workerTerminationTimeout,omitempty"`
+	WorkerAvailabilityTimeoutMilliseconds *int            `json:"workerAvailabilityTimeoutMilliseconds,omitempty"`
+	WorkerAllocatorName                   string          `json:"workerAllocatorName,omitempty"`
+	ExplicitAckMode                       ExplicitAckMode `json:"explicitAckMode,omitempty"`
+	WaitExplicitAckDuringRebalanceTimeout string          `json:"waitExplicitAckDuringRebalanceTimeout,omitempty"`
+
+	Batch *BatchConfiguration `json:"batch,omitempty"`
 	// Dealer Information
 	TotalTasks        int `json:"total_tasks,omitempty"`
 	MaxTaskAllocation int `json:"max_task_allocation,omitempty"`
 
 	// General attributes
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
+
+	// Deprecated: MaxWorkers is replaced by NumWorkers, and will be removed in 1.15.x
+	// TODO: remove in 1.15.x
+	MaxWorkers int `json:"maxWorkers,omitempty"`
+}
+
+type BatchConfiguration struct {
+	Mode      BatchMode `json:"mode,omitempty"`
+	BatchSize int       `json:"batchSize,omitempty"`
+	Timeout   string    `json:"timeout,omitempty"`
+}
+
+type BatchMode string
+
+const (
+	BatchModeEnable  BatchMode = "enable"
+	BatchModeDisable BatchMode = "disable"
+
+	DefaultBatchSize    = 10
+	DefaultBatchTimeout = "1s"
+)
+
+func BatchModeEnabled(batchConfiguration *BatchConfiguration) bool {
+	if batchConfiguration == nil {
+		return false
+	}
+	return batchConfiguration.Mode == BatchModeEnable
+}
+
+var triggerKindsSupportBatching = []string{
+	"http",
+}
+
+var runtimesSupportBatching = []string{
+	"python",
+}
+
+func TriggerKindSupportsBatching(triggerKind string) bool {
+	for _, supportedKind := range triggerKindsSupportBatching {
+		if triggerKind == supportedKind {
+			return true
+		}
+	}
+	return false
+}
+
+func RuntimeSupportsBatching(runtime string) bool {
+	for _, supportedRuntime := range runtimesSupportBatching {
+		if strings.Contains(runtime, supportedRuntime) {
+			return true
+		}
+	}
+	return false
 }
 
 type ExplicitAckMode string
@@ -104,8 +163,19 @@ const (
 	ExplicitAckModeExplicitOnly ExplicitAckMode = "explicitOnly"
 
 	// DefaultWorkerTerminationTimeout wait time for workers to drop or ack events before rebalance initiates
-	DefaultWorkerTerminationTimeout string = "5s"
+	DefaultWorkerTerminationTimeout string = "10s"
 )
+
+var runtimesSupportingExplicitAck = []string{"python"}
+
+func RuntimeSupportExplicitAck(runtime string) bool {
+	for _, supportedRuntime := range runtimesSupportingExplicitAck {
+		if strings.HasPrefix(runtime, supportedRuntime) {
+			return true
+		}
+	}
+	return false
+}
 
 func ExplicitAckModeInSlice(ackMode ExplicitAckMode, ackModes []ExplicitAckMode) bool {
 	for _, mode := range ackModes {
@@ -227,17 +297,18 @@ func GetDefaultHTTPTrigger() Trigger {
 	return Trigger{
 		Kind:       "http",
 		Name:       "default-http",
-		MaxWorkers: 1,
+		NumWorkers: 1,
 	}
 }
 
 // Ingress holds configuration for an ingress - an entity that can route HTTP requests
 // to the function
 type Ingress struct {
-	Host     string                `json:"host,omitempty"`
-	Paths    []string              `json:"paths,omitempty"`
-	PathType networkingv1.PathType `json:"pathType,omitempty"`
-	TLS      IngressTLS            `json:"tls,omitempty"`
+	Host             string                `json:"host,omitempty"`
+	Paths            []string              `json:"paths,omitempty"`
+	PathType         networkingv1.PathType `json:"pathType,omitempty"`
+	TLS              IngressTLS            `json:"tls,omitempty"`
+	IngressClassName string                `json:"ingressClassName,omitempty"`
 }
 
 // IngressTLS holds configuration for an ingress's TLS
@@ -291,68 +362,80 @@ const (
 
 // Build holds all configuration parameters related to building a function
 type Build struct {
-	Path                string                 `json:"path,omitempty"`
-	FunctionSourceCode  string                 `json:"functionSourceCode,omitempty"`
-	FunctionConfigPath  string                 `json:"functionConfigPath,omitempty"`
-	TempDir             string                 `json:"tempDir,omitempty"`
-	Registry            string                 `json:"registry,omitempty"`
-	BaseImageRegistry   string                 `json:"baseImageRegistry,omitempty"`
-	Image               string                 `json:"image,omitempty"`
-	NoBaseImagesPull    bool                   `json:"noBaseImagesPull,omitempty"`
-	NoCache             bool                   `json:"noCache,omitempty"`
-	NoCleanup           bool                   `json:"noCleanup,omitempty"`
-	BaseImage           string                 `json:"baseImage,omitempty"`
-	Commands            []string               `json:"commands,omitempty"`
-	Directives          map[string][]Directive `json:"directives,omitempty"`
-	ScriptPaths         []string               `json:"scriptPaths,omitempty"`
-	AddedObjectPaths    map[string]string      `json:"addedPaths,omitempty"`
-	Dependencies        []string               `json:"dependencies,omitempty"`
-	OnbuildImage        string                 `json:"onbuildImage,omitempty"`
-	Offline             bool                   `json:"offline,omitempty"`
-	RuntimeAttributes   map[string]interface{} `json:"runtimeAttributes,omitempty"`
-	CodeEntryType       string                 `json:"codeEntryType,omitempty"`
-	CodeEntryAttributes map[string]interface{} `json:"codeEntryAttributes,omitempty"`
-	Timestamp           int64                  `json:"timestamp,omitempty"`
-	BuildTimeoutSeconds *int64                 `json:"buildTimeoutSeconds,omitempty"`
-	Mode                BuildMode              `json:"mode,omitempty"`
-	Args                map[string]string      `json:"args,omitempty"`
+	Path                  string                 `json:"path,omitempty"`
+	FunctionSourceCode    string                 `json:"functionSourceCode,omitempty"`
+	FunctionConfigPath    string                 `json:"functionConfigPath,omitempty"`
+	TempDir               string                 `json:"tempDir,omitempty"`
+	Registry              string                 `json:"registry,omitempty"`
+	BaseImageRegistry     string                 `json:"baseImageRegistry,omitempty"`
+	Image                 string                 `json:"image,omitempty"`
+	NoBaseImagesPull      bool                   `json:"noBaseImagesPull,omitempty"`
+	NoCache               bool                   `json:"noCache,omitempty"`
+	NoCleanup             bool                   `json:"noCleanup,omitempty"`
+	BaseImage             string                 `json:"baseImage,omitempty"`
+	Commands              []string               `json:"commands,omitempty"`
+	Directives            map[string][]Directive `json:"directives,omitempty"`
+	ScriptPaths           []string               `json:"scriptPaths,omitempty"`
+	AddedObjectPaths      map[string]string      `json:"addedPaths,omitempty"`
+	Dependencies          []string               `json:"dependencies,omitempty"`
+	OnbuildImage          string                 `json:"onbuildImage,omitempty"`
+	Offline               bool                   `json:"offline,omitempty"`
+	RuntimeAttributes     map[string]interface{} `json:"runtimeAttributes,omitempty"`
+	CodeEntryType         string                 `json:"codeEntryType,omitempty"`
+	CodeEntryAttributes   map[string]interface{} `json:"codeEntryAttributes,omitempty"`
+	Timestamp             int64                  `json:"timestamp,omitempty"`
+	BuildTimeoutSeconds   *int64                 `json:"buildTimeoutSeconds,omitempty"`
+	Mode                  BuildMode              `json:"mode,omitempty"`
+	Args                  map[string]string      `json:"args,omitempty"`
+	Flags                 []string               `json:"flags,omitempty"`
+	BuilderServiceAccount string                 `json:"builderServiceAccount,omitempty"`
 }
 
 // Spec holds all parameters related to a function's configuration
 type Spec struct {
-	Description                   string                  `json:"description,omitempty"`
-	Disable                       bool                    `json:"disable,omitempty"`
-	Publish                       bool                    `json:"publish,omitempty"`
-	Handler                       string                  `json:"handler,omitempty"`
-	Runtime                       string                  `json:"runtime,omitempty"`
-	Env                           []v1.EnvVar             `json:"env,omitempty"`
-	Resources                     v1.ResourceRequirements `json:"resources,omitempty"`
-	Image                         string                  `json:"image,omitempty"`
-	ImageHash                     string                  `json:"imageHash,omitempty"`
-	Replicas                      *int                    `json:"replicas,omitempty"`
-	MinReplicas                   *int                    `json:"minReplicas,omitempty"`
-	MaxReplicas                   *int                    `json:"maxReplicas,omitempty"`
-	TargetCPU                     int                     `json:"targetCPU,omitempty"`
-	DataBindings                  map[string]DataBinding  `json:"dataBindings,omitempty"`
-	Triggers                      map[string]Trigger      `json:"triggers,omitempty"`
-	Volumes                       []Volume                `json:"volumes,omitempty"`
-	Version                       int                     `json:"version,omitempty"`
-	Alias                         string                  `json:"alias,omitempty"`
-	Build                         Build                   `json:"build,omitempty"`
-	RunRegistry                   string                  `json:"runRegistry,omitempty"`
-	ImagePullSecrets              string                  `json:"imagePullSecrets,omitempty"`
-	RuntimeAttributes             map[string]interface{}  `json:"runtimeAttributes,omitempty"`
-	LoggerSinks                   []LoggerSink            `json:"loggerSinks,omitempty"`
-	DealerURI                     string                  `json:"dealerURI,omitempty"`
-	Platform                      Platform                `json:"platform,omitempty"`
-	ReadinessTimeoutSeconds       int                     `json:"readinessTimeoutSeconds,omitempty"`
-	Avatar                        string                  `json:"avatar,omitempty"`
-	ServiceType                   v1.ServiceType          `json:"serviceType,omitempty"`
-	ImagePullPolicy               v1.PullPolicy           `json:"imagePullPolicy,omitempty"`
-	SecurityContext               *v1.PodSecurityContext  `json:"securityContext,omitempty"`
-	ServiceAccount                string                  `json:"serviceAccount,omitempty"`
-	ScaleToZero                   *ScaleToZeroSpec        `json:"scaleToZero,omitempty"`
-	DisableSensitiveFieldsMasking bool                    `json:"disableSensitiveFieldsMasking,omitempty"`
+	Description             string                  `json:"description,omitempty"`
+	Disable                 bool                    `json:"disable,omitempty"`
+	Publish                 bool                    `json:"publish,omitempty"`
+	Handler                 string                  `json:"handler,omitempty"`
+	Runtime                 string                  `json:"runtime,omitempty"`
+	Env                     []v1.EnvVar             `json:"env,omitempty"`
+	EnvFrom                 []v1.EnvFromSource      `json:"envFrom,omitempty"`
+	Resources               v1.ResourceRequirements `json:"resources,omitempty"`
+	Image                   string                  `json:"image,omitempty"`
+	ImageHash               string                  `json:"imageHash,omitempty"`
+	Replicas                *int                    `json:"replicas,omitempty"`
+	MinReplicas             *int                    `json:"minReplicas,omitempty"`
+	MaxReplicas             *int                    `json:"maxReplicas,omitempty"`
+	TargetCPU               int                     `json:"targetCPU,omitempty"`
+	DataBindings            map[string]DataBinding  `json:"dataBindings,omitempty"`
+	Triggers                map[string]Trigger      `json:"triggers,omitempty"`
+	Volumes                 []Volume                `json:"volumes,omitempty"`
+	Version                 int                     `json:"version,omitempty"`
+	Alias                   string                  `json:"alias,omitempty"`
+	Build                   Build                   `json:"build,omitempty"`
+	RunRegistry             string                  `json:"runRegistry,omitempty"`
+	ImagePullSecrets        string                  `json:"imagePullSecrets,omitempty"`
+	RuntimeAttributes       map[string]interface{}  `json:"runtimeAttributes,omitempty"`
+	LoggerSinks             []LoggerSink            `json:"loggerSinks,omitempty"`
+	DealerURI               string                  `json:"dealerURI,omitempty"`
+	Platform                Platform                `json:"platform,omitempty"`
+	ReadinessTimeoutSeconds int                     `json:"readinessTimeoutSeconds,omitempty"`
+	ServiceType             v1.ServiceType          `json:"serviceType,omitempty"`
+	ImagePullPolicy         v1.PullPolicy           `json:"imagePullPolicy,omitempty"`
+	SecurityContext         *v1.PodSecurityContext  `json:"securityContext,omitempty"`
+	ServiceAccount          string                  `json:"serviceAccount,omitempty"`
+	ScaleToZero             *ScaleToZeroSpec        `json:"scaleToZero,omitempty"`
+
+	// If set to nil, the value is taken from the platform configuration. When set explicitly in function config, it has a priority
+	DisableDefaultHTTPTrigger *bool `json:"disableDefaultHTTPTrigger,omitempty"`
+
+	// When set to true, the function spec would not be scrubbed
+	DisableSensitiveFieldsMasking bool `json:"disableSensitiveFieldsMasking,omitempty"`
+
+	// Used for local platform functions mounting specific devices
+	// https://docs.docker.com/engine/reference/run/#runtime-privilege-and-linux-capabilities
+	// E.g.: /dev/video0:/dev/video0 or /dev/video0:/dev/video0:rwm or /dev/fuse
+	Devices []string `json:"devices,omitempty"`
 
 	// Run function on a particular set of node(s)
 	// https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/
@@ -378,7 +461,7 @@ type Spec struct {
 	CustomScalingMetricSpecs []autosv2.MetricSpec `json:"customScalingMetricSpecs,omitempty"`
 	AutoScaleMetrics         []AutoScaleMetric    `json:"autoScaleMetrics,omitempty"`
 
-	// Currently relevant only for k8s platform
+	// WaitReadinessTimeoutBeforeFailure is relevant only for k8s platform
 	// if true - wait the whole ReadinessTimeoutSeconds before marking this function as unhealthy
 	// otherwise, fail the function instantly when there is indication of deployment failure (e.g. pod stuck on crash
 	// loop, pod container exited with an error, pod is unschedulable).
@@ -393,6 +476,14 @@ type Spec struct {
 	// When filled, tolerations, node labels, and affinity would be populated correspondingly to
 	// the platformconfig.PreemptibleNodes values.
 	PreemptionMode RunOnPreemptibleNodeMode `json:"preemptionMode,omitempty"`
+
+	// Sidecars are containers that run alongside the function container in the same pod
+	// the configuration for each sidecar is the same as k8s containers
+	Sidecars []*v1.Container `json:"sidecars,omitempty"`
+
+	// InitContainers are specialized containers that run before app containers in a Pod
+	// Init containers can contain utilities or setup scripts not present in an app image
+	InitContainers []*v1.Container `json:"initContainers,omitempty"`
 }
 
 type RunOnPreemptibleNodeMode string
@@ -491,8 +582,10 @@ func (s *Spec) PositiveGPUResourceLimit() bool {
 }
 
 const (
-	FunctionAnnotationSkipBuild  = "skip-build"
-	FunctionAnnotationSkipDeploy = "skip-deploy"
+	FunctionAnnotationSkipBuild   = "skip-build"
+	FunctionAnnotationSkipDeploy  = "skip-deploy"
+	FunctionAnnotationPrevState   = "nuclio.io/previous-state"
+	FunctionAnnotationForceUpdate = "nuclio.io/force-update"
 )
 
 // Meta identifies a function
@@ -550,6 +643,13 @@ type Config struct {
 	Spec Spec `json:"spec,omitempty"`
 }
 
+func GetFunctionConfigFromInterface(functionConfigInterface interface{}) *Config {
+	if functionConfig, ok := functionConfigInterface.(*Config); ok {
+		return functionConfig
+	}
+	return nil
+}
+
 // NewConfig creates a new configuration structure
 func NewConfig() *Config {
 	return &Config{
@@ -569,15 +669,30 @@ func (c *Config) CleanFunctionSpec() {
 	}
 }
 
-func (c *Config) PrepareFunctionForExport(noScrub bool) {
-	if !noScrub {
+func (c *Config) GetProjectName() (string, error) {
+	if c.Meta.Labels == nil {
+		c.Meta.Labels = make(map[string]string)
+	}
+	if name, ok := c.Meta.Labels[common.NuclioResourceLabelKeyProjectName]; ok {
+		return name, nil
+	}
+	return "", errors.New("Project label not found")
+}
+
+func (c *Config) PrepareFunctionForExport(exportOptions *common.ExportFunctionOptions) {
+	if !exportOptions.NoScrub {
 		c.scrubFunctionData()
+	}
+
+	if exportOptions.CleanupSpec {
+		c.CleanFunctionSpec()
 	}
 
 	// resource version should not be exported anyway, as it's a k8s thing
 	c.Meta.ResourceVersion = ""
 
 	c.AddSkipAnnotations()
+	c.AddPrevStateAnnotation(exportOptions.PrevState)
 }
 
 func (c *Config) AddSkipAnnotations() {
@@ -591,9 +706,14 @@ func (c *Config) AddSkipAnnotations() {
 	c.Meta.AddSkipDeployAnnotation()
 }
 
-func (c *Config) scrubFunctionData() {
-	c.CleanFunctionSpec()
+func (c *Config) AddPrevStateAnnotation(state string) {
+	if c.Meta.Annotations == nil {
+		c.Meta.Annotations = map[string]string{}
+	}
+	c.Meta.Annotations[FunctionAnnotationPrevState] = state
+}
 
+func (c *Config) scrubFunctionData() {
 	// scrub namespace from function meta
 	c.Meta.Namespace = ""
 
@@ -795,6 +915,15 @@ func FunctionStateProvisioning(functionState FunctionState) bool {
 	return !FunctionStateProvisioned(functionState)
 }
 
+func IsPreviousFunctionStateAllowedToBeSet(prevState FunctionState) bool {
+	allowedPreviousStates := []FunctionState{
+		FunctionStateScaledToZero,
+		FunctionStateReady,
+		FunctionStateImported,
+	}
+	return FunctionStateInSlice(prevState, allowedPreviousStates)
+}
+
 // Status holds the status of the function
 type Status struct {
 	State       FunctionState            `json:"state,omitempty"`
@@ -816,6 +945,9 @@ type Status struct {
 	// list of external urls, containing ingresses and external-ip:function-port
 	// e.g.: [ my-function.some-domain.com/pathA, other-ingress.some-domain.co, 1.2.3.4:3000 ]
 	ExternalInvocationURLs []string `json:"externalInvocationUrls,omitempty"`
+
+	// node selector from function config enriched with project's and platform node selectors
+	EnrichedNodeSelector map[string]string `json:"enrichedNodeSelector,omitempty"`
 }
 
 func (s *Status) InvocationURLs() []string {
@@ -839,3 +971,5 @@ type ConfigWithStatus struct {
 	Config `json:",inline" yaml:",inline"`
 	Status Status `json:"status,omitempty"`
 }
+
+var FixableValidationErrors = []string{"V3IO Stream trigger does not support autoscaling"}

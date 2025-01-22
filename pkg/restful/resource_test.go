@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -51,6 +50,10 @@ func (r *resource) respondWithError(request *http.Request) (bool, error) {
 
 	if request.Header.Get("return") == "error-with-status-202" {
 		return true, nuclio.ErrAccepted
+	}
+
+	if request.Header.Get("return") == "error-with-status-204" {
+		return true, nuclio.ErrNoContent
 	}
 
 	if request.Header.Get("return") == "error-with-status-409" {
@@ -166,15 +169,6 @@ func (suite *resourceTestSuite) sendRequest(method string,
 	return response, decodedResponseBody
 }
 
-// remove tabs and newlines
-func (suite *resourceTestSuite) cleanJSONstring(input string) string {
-	for _, char := range []string{"\n", "\t"} {
-		input = strings.ReplaceAll(input, char, "")
-	}
-
-	return input
-}
-
 // send error triggering requests
 func (suite *resourceTestSuite) sendErrorRequests(method string, path string) {
 	var code int
@@ -273,6 +267,14 @@ func (r1 *r1Resource) Delete(request *http.Request, id string) error {
 	return nil
 }
 
+func (r1 *r1Resource) Patch(request *http.Request, id string) error {
+	if respondWithError, err := r1.respondWithError(request); respondWithError {
+		return err
+	}
+
+	return nil
+}
+
 func (r1 *r1Resource) getCustomSingle(request *http.Request) (*CustomRouteFuncResponse, error) {
 	resourceID := chi.URLParam(request, "id")
 
@@ -328,6 +330,7 @@ func (suite *r1TestSuite) SetupTest() {
 				ResourceMethodCreate,
 				ResourceMethodUpdate,
 				ResourceMethodDelete,
+				ResourceMethodPatch,
 			}),
 		},
 	}
@@ -440,6 +443,15 @@ func (suite *r1TestSuite) TestDeleteErrors() {
 	suite.sendErrorRequests("DELETE", "/r1/123")
 }
 
+func (suite *r1TestSuite) TestPatch() {
+	code := http.StatusNoContent
+	suite.sendRequest("PATCH", "/r1/123", nil, nil, &code, nil, nil)
+}
+
+func (suite *r1TestSuite) TestPatchErrors() {
+	suite.sendErrorRequests("PATCH", "/r1/123")
+}
+
 //
 // R2
 //
@@ -470,6 +482,10 @@ func (r2 *r2Resource) Delete(request *http.Request, id string) error {
 	return nuclio.ErrNotFound
 }
 
+func (r2 *r2Resource) Patch(request *http.Request, id string) error {
+	return nuclio.ErrNotFound
+}
+
 // test suite
 type r2TestSuite struct {
 	resourceTestSuite
@@ -485,6 +501,7 @@ func (suite *r2TestSuite) SetupTest() {
 			ResourceMethodCreate,
 			ResourceMethodUpdate,
 			ResourceMethodDelete,
+			ResourceMethodPatch,
 		}),
 	}
 	suite.r2Resource.Resource = suite.r2Resource

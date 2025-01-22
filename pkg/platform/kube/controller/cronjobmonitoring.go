@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"runtime/debug"
 	"time"
 
@@ -104,7 +105,7 @@ func (cjm *CronJobMonitoring) deleteStalePods(ctx context.Context, stalePodsFiel
 		Pods(cjm.controller.namespace).
 		DeleteCollection(ctx, metav1.DeleteOptions{},
 			metav1.ListOptions{
-				LabelSelector: "nuclio.io/function-cron-job-pod=true",
+				LabelSelector: fmt.Sprintf("%s=true", common.NuclioLabelKeyFunctionCronJobPod),
 				FieldSelector: stalePodsFieldSelector,
 			})
 	if err != nil {
@@ -119,7 +120,7 @@ func (cjm *CronJobMonitoring) deleteStaleJobs(ctx context.Context) {
 		BatchV1().
 		Jobs(cjm.controller.namespace).
 		List(ctx, metav1.ListOptions{
-			LabelSelector: "nuclio.io/function-cron-job-pod=true",
+			LabelSelector: fmt.Sprintf("%s=true", common.NuclioLabelKeyFunctionCronJobPod),
 		})
 	if err != nil {
 		cjm.logger.WarnWithCtx(ctx, "Failed to list cron-job jobs",

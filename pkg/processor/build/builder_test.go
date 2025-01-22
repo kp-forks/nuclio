@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the Licensg.
@@ -19,11 +19,13 @@ limitations under the License.
 package build
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nuclio/nuclio/pkg/common"
@@ -53,6 +55,7 @@ type testSuite struct {
 	testID       string
 	mockS3Client *common.MockS3Client
 	mockPlatform *mockplatform.Platform
+	ctx          context.Context
 }
 
 // SetupSuite is called for suite setup
@@ -66,6 +69,8 @@ func (suite *testSuite) SetupSuite() {
 		FilePath: FunctionsArchiveFilePath,
 	}
 	suite.mockPlatform = &mockplatform.Platform{}
+
+	suite.ctx = context.Background()
 }
 
 // SetupTest is called before each test in the suite
@@ -77,9 +82,14 @@ func (suite *testSuite) SetupTest() {
 		suite.Fail("Instantiating Builder failed:", err)
 	}
 
+	functionConfig := functionconfig.NewConfig()
+	functionConfig.Meta.Labels = map[string]string{
+		common.NuclioResourceLabelKeyProjectName: platform.DefaultProjectName,
+	}
+
 	createFunctionOptions := &platform.CreateFunctionOptions{
 		Logger:         suite.logger,
-		FunctionConfig: *functionconfig.NewConfig(),
+		FunctionConfig: *functionConfig,
 	}
 
 	createFunctionBuildOptions := &platform.CreateFunctionBuildOptions{
@@ -100,6 +110,13 @@ func (suite *testSuite) TestGetRuntimeNameFromConfig() {
 	}
 
 	suite.Require().Equal("foo", runtimeName)
+}
+
+func (suite *testSuite) TestGetBuildFlags() {
+	suite.builder.options.FunctionConfig.Spec.Build.Flags = []string{"--insecure-pull", "-f && whoami &&", "--label key=value"}
+	flags := suite.builder.getBuildFlags()
+
+	suite.Require().Equal(map[string]bool{"'--label key=value'": true, "'-f && whoami &&'": true, "--insecure-pull": true}, flags)
 }
 
 // Make sure that "Builder.getRuntimeName" properly reads the runtime name from the build path if not set by the user
@@ -556,7 +573,7 @@ func (suite *testSuite) TestResolveFunctionPathNonStringWorkDir() {
 }
 
 func (suite *testSuite) TestResolveFunctionPathGithubCodeEntry() {
-	archiveFileURL := "https://github.com/nuclio/my-func/archive/master.zip"
+	archiveFileURL := "https://api.github.com/repos/nuclio/my-func/zipball/master"
 	buildConfiguration := functionconfig.Build{
 		CodeEntryType: GithubEntryType,
 		Path:          "https://github.com/nuclio/my-func",
@@ -687,6 +704,17 @@ func (suite *testSuite) TestResolveFunctionPathGitCodeEntry() {
 				},
 			},
 		},
+		{
+			Name: "AzureDevopsBranchWithDuplicatedProjectName",
+			BuildConfiguration: functionconfig.Build{
+				CodeEntryType: GitEntryType,
+				Path:          "https://sahar920089@dev.azure.com/sahar920089/test-nuclio-cet/_git/test-nuclio-cet",
+				CodeEntryAttributes: map[string]interface{}{
+					"workDir": "go-function",
+					"branch":  "go-func",
+				},
+			},
+		},
 	} {
 		suite.Run(testCase.Name, func() {
 			err := suite.builder.createTempDir()
@@ -694,7 +722,7 @@ func (suite *testSuite) TestResolveFunctionPathGitCodeEntry() {
 
 			suite.builder.options.FunctionConfig.Spec.Build = testCase.BuildConfiguration
 
-			path, _, err := suite.builder.resolveFunctionPath(testCase.BuildConfiguration.Path)
+			path, _, err := suite.builder.resolveFunctionPath(suite.ctx, testCase.BuildConfiguration.Path)
 			suite.Require().NoError(err)
 
 			// make sure the path is set to the work dir inside the downloaded folder
@@ -727,11 +755,49 @@ func Handler(context *nuclio.Context, event nuclio.Event) (interface{}, error) {
 	}
 }
 
+func (suite *testSuite) TestFallbackOnUnknownArchiveExtension() {
+	err := suite.builder.createTempDir()
+	suite.Assert().NoError(err)
+	defer suite.builder.cleanupTempDir() // nolint: errcheck
+
+	for _, testCase := range []struct {
+		name              string
+		functionPath      string
+		expectedExtension string
+	}{
+		{
+			name:              "tar",
+			functionPath:      "my-func.tar",
+			expectedExtension: "tar",
+		},
+		{
+			name:              "unknown",
+			functionPath:      "my-func.unknown",
+			expectedExtension: "unknown",
+		},
+		{
+			name:              "no-extension",
+			functionPath:      "my-func",
+			expectedExtension: "zip",
+		},
+		{
+			name:              "invalid",
+			functionPath:      "my-func.",
+			expectedExtension: "zip",
+		},
+	} {
+		tempFile, err := suite.builder.getFunctionTempFile(suite.builder.tempDir, testCase.functionPath, true, ArchiveEntryType)
+		suite.Require().NoError(err)
+		suite.Require().NotEmpty(tempFile)
+		suite.Require().Equal(testCase.expectedExtension, strings.TrimPrefix(filepath.Ext(tempFile.Name()), "."))
+	}
+}
+
 // test that when `spec.build.image` is given, it is enriched correctly
 func (suite *testSuite) TestImageNameConfigurationEnrichment() {
 	suite.builder.options.FunctionConfig.Meta.Name = "name"
 	suite.builder.options.FunctionConfig.Spec.Handler = "handler"
-	suite.builder.options.FunctionConfig.Spec.Runtime = "python3.6"
+	suite.builder.options.FunctionConfig.Spec.Runtime = "python3.9"
 
 	type testAttributes struct {
 		inputImageName             string
@@ -819,6 +885,77 @@ func (suite *testSuite) TestResolveRepoName() {
 	}
 }
 
+func (suite *testSuite) TestExtractOrgAndRepoFromGithubURL() {
+	for _, testCase := range []struct {
+		name          string
+		url           string
+		org           string
+		repo          string
+		expectedError bool
+	}{
+		// Happy flows
+		{
+			name: "valid github url",
+			url:  "https://github.com/my-org/my-repo",
+			org:  "my-org",
+			repo: "my-repo",
+		},
+		{
+			name: "valid github with http",
+			url:  "http://github.com/my-org/my-repo",
+			org:  "my-org",
+			repo: "my-repo",
+		},
+		{
+			name: "valid github with trailing slash",
+			url:  "https://github.com/my-org/my-repo/",
+			org:  "my-org",
+			repo: "my-repo",
+		},
+		{
+			name: "valid github with www",
+			url:  "https://www.github.com/my-org/my-repo/",
+			org:  "my-org",
+			repo: "my-repo",
+		},
+		{
+			name: "valid github api url",
+			url:  "https://api.github.com/repos/my-org/my-repo",
+			org:  "my-org",
+			repo: "my-repo",
+		},
+		// Error flows
+		{
+			name:          "non github url",
+			url:           "https://foo.com/my-org/my-repo",
+			expectedError: true,
+		},
+
+		{
+			name:          "invalid github url",
+			url:           "https://github.com/my-org/something/my-repo",
+			expectedError: true,
+		},
+
+		{
+			name:          "valid github without protocol",
+			url:           "github.com/my-org/my-repo",
+			expectedError: true,
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			org, repo, err := suite.builder.extractOrgAndRepoFromGithubURL(testCase.url)
+			if testCase.expectedError {
+				suite.Require().Error(err)
+			} else {
+				suite.Require().NoError(err)
+				suite.Require().Equal(testCase.org, org)
+				suite.Require().Equal(testCase.repo, repo)
+			}
+		})
+	}
+}
+
 func (suite *testSuite) testResolveFunctionPathRemoteCodeFile(fileExtension string) {
 
 	// mock http response
@@ -844,7 +981,7 @@ func (suite *testSuite) testResolveFunctionPathRemoteCodeFile(fileExtension stri
 
 	defer suite.builder.cleanupTempDir() // nolint: errcheck
 
-	path, _, err := suite.builder.resolveFunctionPath(codeFileURL)
+	path, _, err := suite.builder.resolveFunctionPath(suite.ctx, codeFileURL)
 	suite.Require().NoError(err)
 
 	expectedFilePath := filepath.Join(suite.builder.tempDir, "/download/my-func."+fileExtension)
@@ -885,7 +1022,7 @@ func (suite *testSuite) testResolveFunctionPathArchive(buildConfiguration functi
 
 	suite.builder.options.FunctionConfig.Spec.Build = buildConfiguration
 
-	path, _, err := suite.builder.resolveFunctionPath(buildConfiguration.Path)
+	path, _, err := suite.builder.resolveFunctionPath(suite.ctx, buildConfiguration.Path)
 	suite.Require().NoError(err)
 
 	// make sure the path is set to the work dir inside the decompressed folder
@@ -918,7 +1055,7 @@ func (suite *testSuite) testResolveFunctionPathArchiveBadWorkDir(buildConfigurat
 
 	suite.builder.options.FunctionConfig.Spec.Build = buildConfiguration
 
-	_, _, err = suite.builder.resolveFunctionPath(buildConfiguration.Path)
+	_, _, err = suite.builder.resolveFunctionPath(suite.ctx, buildConfiguration.Path)
 	suite.EqualError(errors.RootCause(err), expectedError)
 
 	suite.builder.cleanupTempDir() // nolint: errcheck

@@ -1,7 +1,7 @@
 //go:build test_functional && test_kube
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,12 @@ limitations under the License.
 package test
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +43,7 @@ import (
 
 // PlatformTestSuite requires
 //   - minikube >= 1.22.0 (https://minikube.sigs.k8s.io/docs/start/) with a preinstalled cluster. e.g.:
-//     > minikube start --profile nuclio-test --kubernetes-version v1.23.8 --driver docker --addons registry --ports=127.0.0.1:30060:30060
+//     > minikube start --profile nuclio-test --kubernetes-version v1.24.11 --driver docker --addons registry --ports=127.0.0.1:30060:30060
 //   - helm >= 3.3.0 (https://helm.sh/docs/intro/install/)
 type PlatformTestSuite struct {
 	suite.Suite
@@ -51,6 +53,7 @@ type PlatformTestSuite struct {
 	minikubeProfile string
 	namespace       string
 	backendAPIURL   string
+	httpClient      *http.Client
 }
 
 func (suite *PlatformTestSuite) SetupSuite() {
@@ -69,6 +72,16 @@ func (suite *PlatformTestSuite) SetupSuite() {
 	// assumes that minikube exposed the backend API on port 30060
 	suite.backendAPIURL = common.GetEnvOrDefaultString("NUCLIO_TEST_BACKEND_API_URL", "http://localhost:30060/api")
 	suite.registryURL = suite.resolveInClusterRegistryURL()
+
+	suite.httpClient = &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: true,
+			},
+		},
+	}
 }
 
 func (suite *PlatformTestSuite) SetupTest() {
@@ -94,6 +107,56 @@ func (suite *PlatformTestSuite) TestBuildAndDeployFunctionWithKaniko() {
 	suite.waitForFunctionToBeReady(functionConfig)
 }
 
+func (suite *PlatformTestSuite) TestDeletedKanikoPods() {
+
+	// generate function config
+	functionConfig := suite.compileFunctionConfig()
+
+	// create function
+	suite.createFunction(functionConfig)
+
+	findKanikoFunc := func(output string) string {
+
+		// split the output and find kaniko pod
+		for _, line := range strings.Fields(output) {
+			if strings.Contains(line, "kaniko") {
+				return strings.TrimSpace(line)
+			}
+		}
+		return ""
+	}
+
+	// find kaniko pod
+	var kanikoPodName string
+	go func() {
+		err := common.RetryUntilSuccessful(10*time.Minute, 10*time.Second,
+			func() bool {
+				result := suite.executeKubectl([]string{"get", "pods"}, nil)
+				if result.ExitCode != 0 {
+					suite.logger.WarnWith("Failed to get pods",
+						"output", result.Output,
+						"error", result.Stderr,
+						"exitCode", result.ExitCode)
+					return false
+				}
+
+				kanikoPodName = findKanikoFunc(result.Output)
+				return kanikoPodName != ""
+			})
+		suite.Require().NoError(err)
+	}()
+
+	suite.waitForFunctionToBeReady(functionConfig)
+
+	// wait job deletion timeout
+	<-time.After(1 * time.Minute)
+
+	// check kaniko pods are deleted
+	result := suite.executeKubectl([]string{"get", "pods", kanikoPodName}, nil)
+	suite.Require().Equal(0, result.ExitCode)
+	suite.Require().Empty(findKanikoFunc(result.Output))
+}
+
 func (suite *PlatformTestSuite) compileFunctionConfig() *functionconfig.Config {
 	functionConfig := functionconfig.NewConfig()
 	functionConfig.Meta.Namespace = suite.namespace
@@ -101,7 +164,7 @@ func (suite *PlatformTestSuite) compileFunctionConfig() *functionconfig.Config {
 	functionConfig.Spec.RunRegistry = suite.registryURL
 	functionConfig.Spec.Build.Registry = suite.registryURL
 	functionConfig.Spec.Handler = "main:handler"
-	functionConfig.Spec.Runtime = "python:3.8"
+	functionConfig.Spec.Runtime = "python:3.11"
 	functionConfig.Spec.Build.FunctionSourceCode = base64.StdEncoding.EncodeToString([]byte(`
 def handler(context, event):
   return "hello world"
@@ -149,7 +212,7 @@ func (suite *PlatformTestSuite) executeHelm(runOptions *cmdrunner.RunOptions,
 	return results.Output
 }
 
-func (suite *PlatformTestSuite) executeMinikube(positionalArgs []string,
+func (suite *PlatformTestSuite) executeMinikube(positionalArgs []string, // nolint: unused
 	namedArgs map[string]string) string {
 
 	if len(positionalArgs) == 0 {
@@ -228,6 +291,7 @@ func (suite *PlatformTestSuite) installNuclioHelmChart() {
 				"dashboard.containerBuilderKind":        "kaniko",
 				"dashboard.kaniko.insecurePushRegistry": "true",
 				"dashboard.kaniko.insecurePullRegistry": "true",
+				"dashboard.kaniko.jobDeletionTimeout":   "1m",
 			}),
 		})
 	suite.Require().NoError(err)
@@ -266,7 +330,7 @@ func (suite *PlatformTestSuite) createFunction(functionConfig *functionconfig.Co
 	encodedFunctionConfig, err := json.Marshal(functionConfig)
 	suite.Require().NoError(err)
 
-	_, _, err = common.SendHTTPRequest(nil,
+	_, _, err = common.SendHTTPRequest(suite.httpClient,
 		http.MethodPost,
 		suite.backendAPIURL+"/functions",
 		encodedFunctionConfig,
@@ -277,7 +341,7 @@ func (suite *PlatformTestSuite) createFunction(functionConfig *functionconfig.Co
 }
 
 func (suite *PlatformTestSuite) getFunction(functionName string) (*functionconfig.ConfigWithStatus, error) {
-	responseBody, response, err := common.SendHTTPRequest(nil,
+	responseBody, response, err := common.SendHTTPRequest(suite.httpClient,
 		http.MethodGet,
 		fmt.Sprintf("%s/functions/%s", suite.backendAPIURL, functionName),
 		nil,

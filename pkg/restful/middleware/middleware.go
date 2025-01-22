@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nuclio/logger"
@@ -102,7 +103,7 @@ func RequestResponseLogger(logger logger.Logger) func(next http.Handler) http.Ha
 			requestHeaders := request.Header.Clone() // for logging purposes
 			for _, headerToRedact := range []string{
 				"cookie",
-				"x-v3io-session-key",
+				headers.V3IOSessionKey,
 			} {
 				if requestHeaders.Get(headerToRedact) != "" {
 					requestHeaders.Set(headerToRedact, "[redacted]")

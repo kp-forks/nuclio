@@ -1,4 +1,4 @@
-# Golang (Go) Reference
+# Golang
 
 This document describes specific Golang (Go) build and deploy configurations.
 
@@ -25,12 +25,12 @@ The function package must be `main`, because the code compiles into a Go plugin.
 
 ## Dockerfile
 
-See [Deploying Functions from a Dockerfile](/docs/tasks/deploy-functions-from-dockerfile.md).
+See [Deploying Functions from a Dockerfile](../../../tasks/deploy-functions-from-dockerfile.md).
 
 ```
 ARG NUCLIO_LABEL=0.5.6
 ARG NUCLIO_ARCH=amd64
-ARG NUCLIO_BASE_IMAGE=alpine:3.15
+ARG NUCLIO_BASE_IMAGE=alpine:3.20
 ARG NUCLIO_ONBUILD_IMAGE=nuclio/handler-builder-golang-onbuild:${NUCLIO_LABEL}-${NUCLIO_ARCH}-alpine
 
 # Supplies processor uhttpc, used for healthcheck

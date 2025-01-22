@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,7 +46,8 @@ import (
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	"github.com/samber/lo"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
@@ -61,6 +62,9 @@ const (
 	FunctionContainerHTTPPort            = 8080
 	FunctionContainerWebAdminHTTPPort    = 8081
 	FunctionContainerHealthCheckHTTPPort = 8082
+	FunctionContainerMetricPort          = 8090
+	FunctionContainerHTTPPortName        = "http"
+	FunctionContainerMetricPortName      = "metrics"
 	DefaultTargetCPU                     = 75
 )
 
@@ -75,29 +79,25 @@ type Platform struct {
 	ImageNamePrefixTemplate string
 	DefaultNamespace        string
 	OpaClient               opa.Client
-	Scrubber                *functionconfig.Scrubber
+	FunctionScrubber        *functionconfig.Scrubber
 }
 
 func NewPlatform(parentLogger logger.Logger,
-	platform platform.Platform,
+	platformInstance platform.Platform,
 	platformConfiguration *platformconfig.Config,
 	defaultNamespace string) (*Platform, error) {
 	var err error
 
 	newPlatform := &Platform{
 		Logger:           parentLogger.GetChild("platform"),
-		platform:         platform,
+		platform:         platformInstance,
 		Config:           platformConfiguration,
 		DeployLogStreams: &sync.Map{},
-		Scrubber: functionconfig.NewScrubber(
-			platformConfiguration.SensitiveFields.CompileSensitiveFieldsRegex(),
-			nil, /* kubeClientSet */
-		),
 		DefaultNamespace: defaultNamespace,
 	}
 
 	// create invoker
-	newPlatform.invoker, err = newInvoker(newPlatform.Logger, platform)
+	newPlatform.invoker, err = newInvoker(newPlatform.Logger, platformInstance)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create invoker")
 	}
@@ -114,6 +114,12 @@ func (ap *Platform) GetConfig() *platformconfig.Config {
 func (ap *Platform) CreateFunctionBuild(ctx context.Context,
 	createFunctionBuildOptions *platform.CreateFunctionBuildOptions) (
 	*platform.CreateFunctionBuildResult, error) {
+
+	// ensure container builder is initialized (idempotent).
+	// it is called here as well for cases where this function was not called from the dashboard
+	if err := ap.platform.InitializeContainerBuilder(); err != nil {
+		return nil, errors.Wrap(err, "Failed to initialize container builder")
+	}
 
 	// execute a build
 	builder, err := build.NewBuilder(createFunctionBuildOptions.Logger, ap.platform, &common.AbstractS3Client{})
@@ -148,52 +154,62 @@ func (ap *Platform) HandleDeployFunction(ctx context.Context,
 		return onAfterConfigUpdated()
 	}
 
-	functionBuildRequired, err := ap.functionBuildRequired(&createFunctionOptions.FunctionConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed determining whether function should build")
-	}
-
-	// clear build mode
-	createFunctionOptions.FunctionConfig.Spec.Build.Mode = ""
+	var functionBuildRequired bool
+	var err error
 
 	// check if we need to build the image
-	if functionBuildRequired && !functionconfig.ShouldSkipBuild(createFunctionOptions.FunctionConfig.Meta.Annotations) {
+	if !functionconfig.ShouldSkipBuild(createFunctionOptions.FunctionConfig.Meta.Annotations) {
 
-		// if the function is updated, it might have scrubbed data in the spec that the builder requires,
-		// so we need to restore it before building
-		restoredFunctionConfig, err := ap.Scrubber.RestoreFunctionConfig(ctx,
-			&createFunctionOptions.FunctionConfig,
-			ap.platform.GetName(),
-			ap.GetFunctionSecretMap)
+		functionBuildRequired, err = ap.functionBuildRequired(&createFunctionOptions.FunctionConfig)
 		if err != nil {
-			return nil, errors.Wrap(err, "Failed to restore function config")
+			return nil, errors.Wrap(err, "Failed determining whether function should build")
 		}
-		createFunctionOptions.FunctionConfig = *restoredFunctionConfig
 
-		buildResult, buildErr = ap.platform.CreateFunctionBuild(ctx,
-			&platform.CreateFunctionBuildOptions{
-				Logger:                     createFunctionOptions.Logger,
-				FunctionConfig:             createFunctionOptions.FunctionConfig,
-				PlatformName:               ap.platform.GetName(),
-				OnAfterConfigUpdate:        onAfterConfigUpdatedWrapper,
-				DependantImagesRegistryURL: createFunctionOptions.DependantImagesRegistryURL,
-			})
+		// clear build mode
+		createFunctionOptions.FunctionConfig.Spec.Build.Mode = ""
 
-		if buildErr == nil {
+		if functionBuildRequired {
 
-			// use the function configuration augmented by the builder
-			createFunctionOptions.FunctionConfig.Spec.Image = buildResult.Image
+			// if the function is updated, it might have scrubbed data in the spec that the builder requires,
+			// so we need to restore it before building
+			if functionScrubber := ap.platform.GetFunctionScrubber(); functionScrubber != nil {
+				restoredFunctionConfig, err := functionScrubber.RestoreFunctionConfig(ctx,
+					&createFunctionOptions.FunctionConfig,
+					ap.platform.GetName())
 
-			// if run registry isn't set, set it to that of the build
-			if createFunctionOptions.FunctionConfig.Spec.RunRegistry == "" {
-				createFunctionOptions.FunctionConfig.Spec.RunRegistry =
-					createFunctionOptions.FunctionConfig.Spec.Build.Registry
+				if err != nil {
+					return nil, errors.Wrap(err, "Failed to restore function config")
+				}
+				createFunctionOptions.FunctionConfig = *restoredFunctionConfig
 			}
 
-			// on successful build set the timestamp of build
-			createFunctionOptions.FunctionConfig.Spec.Build.Timestamp = time.Now().Unix()
+			buildResult, buildErr = ap.platform.CreateFunctionBuild(ctx,
+				&platform.CreateFunctionBuildOptions{
+					Logger:                     createFunctionOptions.Logger,
+					FunctionConfig:             createFunctionOptions.FunctionConfig,
+					PlatformName:               ap.platform.GetName(),
+					OnAfterConfigUpdate:        onAfterConfigUpdatedWrapper,
+					DependantImagesRegistryURL: createFunctionOptions.DependantImagesRegistryURL,
+				})
+
+			if buildErr == nil {
+
+				// use the function configuration augmented by the builder
+				createFunctionOptions.FunctionConfig.Spec.Image = buildResult.Image
+
+				// if run registry isn't set, set it to that of the build
+				if createFunctionOptions.FunctionConfig.Spec.RunRegistry == "" {
+					createFunctionOptions.FunctionConfig.Spec.RunRegistry =
+						createFunctionOptions.FunctionConfig.Spec.Build.Registry
+				}
+
+				// on successful build set the timestamp of build
+				createFunctionOptions.FunctionConfig.Spec.Build.Timestamp = time.Now().Unix()
+			}
 		}
-	} else {
+	}
+
+	if !functionBuildRequired {
 		createFunctionOptions.Logger.InfoWithCtx(ctx,
 			"Skipping build",
 			"name", createFunctionOptions.FunctionConfig.Meta.Name)
@@ -209,7 +225,7 @@ func (ap *Platform) HandleDeployFunction(ctx context.Context,
 		}
 
 		// trigger the on after config update ourselves
-		if err = onAfterConfigUpdatedWrapper(&createFunctionOptions.FunctionConfig); err != nil {
+		if err := onAfterConfigUpdatedWrapper(&createFunctionOptions.FunctionConfig); err != nil {
 			return nil, errors.Wrap(err, "Failed to trigger on after config update")
 		}
 	}
@@ -266,6 +282,14 @@ func (ap *Platform) EnrichFunctionConfig(ctx context.Context, functionConfig *fu
 		functionConfig.Spec.Runtime = "python:3.9"
 	}
 
+	if functionConfig.Spec.DisableDefaultHTTPTrigger == nil {
+		ap.Logger.DebugWithCtx(ctx,
+			"Enriching disable default http trigger flag",
+			"functionName", functionConfig.Meta.Name,
+			"disableDefaultHttpTrigger", ap.Config.DisableDefaultHTTPTrigger)
+		functionConfig.Spec.DisableDefaultHTTPTrigger = &ap.Config.DisableDefaultHTTPTrigger
+	}
+
 	// enrich triggers
 	if err := ap.enrichTriggers(ctx, functionConfig); err != nil {
 		return errors.Wrap(err, "Failed enriching triggers")
@@ -282,7 +306,7 @@ func (ap *Platform) EnrichFunctionConfig(ctx context.Context, functionConfig *fu
 
 	ap.enrichEnvVars(functionConfig)
 
-	ap.Config.EnrichContainerResources(ctx, ap.Logger, &functionConfig.Spec.Resources)
+	ap.Config.EnrichFunctionContainerResources(ctx, ap.Logger, &functionConfig.Spec.Resources)
 
 	return nil
 }
@@ -293,17 +317,33 @@ func (ap *Platform) EnrichLabels(ctx context.Context, labels map[string]string) 
 		labels[common.NuclioResourceLabelKeyProjectName] = platform.DefaultProjectName
 		ap.Logger.DebugCtx(ctx, "No project name specified. Setting to default")
 	}
+	ap.enrichUsernameAndDomainLabels(ctx, labels)
+}
 
+func (ap *Platform) enrichUsernameAndDomainLabels(ctx context.Context, labels map[string]string) {
 	// enrich labels with iguazio.com/username of the creating user
 	if authSession, ok := ctx.Value(auth.AuthSessionContextKey).(*auth.IguazioSession); ok {
-		if value, exist := labels[iguazio.IguzioUsernameLabel]; !exist || value == "" {
-			labels[iguazio.IguzioUsernameLabel] = authSession.GetUsername()
+		if value, exist := labels[iguazio.IguazioUsernameLabel]; !exist || value == "" {
+			fullUsername := authSession.GetUsername()
+
+			// split email usernames to name and domain because '@' is an invalid character in kubernetes labels
+			if strings.Contains(fullUsername, "@") {
+				split := strings.Split(fullUsername, "@")
+				labels[iguazio.IguazioUsernameLabel] = split[0]
+				labels[iguazio.IguazioDomainLabel] = split[1]
+			} else {
+				labels[iguazio.IguazioUsernameLabel] = fullUsername
+			}
 		}
 	}
 }
 
 func (ap *Platform) enrichDefaultHTTPTrigger(functionConfig *functionconfig.Config) {
 	if len(functionconfig.GetTriggersByKind(functionConfig.Spec.Triggers, "http")) > 0 {
+		return
+	}
+	if functionConfig.Spec.DisableDefaultHTTPTrigger != nil && *functionConfig.Spec.DisableDefaultHTTPTrigger {
+		ap.Logger.Debug("Skipping default http trigger creation")
 		return
 	}
 
@@ -419,7 +459,8 @@ func (ap *Platform) ValidateFunctionConfig(ctx context.Context, functionConfig *
 		return errors.Wrap(err, "Min max replicas validation failed")
 	}
 
-	if err := ap.validateNodeSelector(functionConfig); err != nil {
+	// validate function node selector
+	if err := common.ValidateLabels(functionConfig.Spec.NodeSelector); err != nil {
 		return errors.Wrap(err, "Node selector validation failed")
 	}
 
@@ -435,10 +476,64 @@ func (ap *Platform) ValidateFunctionConfig(ctx context.Context, functionConfig *
 		return errors.Wrap(err, "Priority class name validation failed")
 	}
 
+	if err := ap.validateScaleToZero(functionConfig); err != nil {
+		return errors.Wrap(err, "Scale to zero validation failed")
+	}
+
 	if err := ap.validateAutoScaleMetrics(functionConfig); err != nil {
 		return errors.Wrap(err, "Auto scale metrics validation failed")
 	}
 
+	return nil
+}
+
+func (ap *Platform) AutoFixConfiguration(ctx context.Context, err error, functionConfig *functionconfig.Config) bool {
+	if errors.RootCause(err).Error() == "V3IO Stream trigger does not support autoscaling" {
+		if *functionConfig.Spec.MinReplicas == 0 {
+			ap.Logger.WarnWithCtx(ctx, "V3IO Stream doesn't support scaling from zero - "+
+				"Auto fixing by setting minReplicas to 1",
+				"function", functionConfig.Meta.Name)
+			oneValue := 1
+			functionConfig.Spec.MinReplicas = &oneValue
+		}
+
+		ap.Logger.WarnWithCtx(ctx, "V3IO Stream trigger does not support autoscaling - "+
+			"Auto fixing by setting maxReplicas to minReplicas for function",
+			"function", functionConfig.Meta.Name,
+			"replicas", functionConfig.Spec.MinReplicas)
+		functionConfig.Spec.MaxReplicas = functionConfig.Spec.MinReplicas
+		return true
+	}
+	return false
+}
+
+func (ap *Platform) ValidateFunctionConfigWithRetry(ctx context.Context, functionConfig *functionconfig.Config, autofix bool) error {
+	functionValidationFailedErr := "Failed to validate a function configuration"
+	err := ap.platform.ValidateFunctionConfig(ctx, functionConfig)
+
+	if !autofix {
+		if err != nil {
+			return errors.Wrap(err, functionValidationFailedErr)
+		}
+		return nil
+	}
+
+	// defines the maximum number of attempts to autofix the configuration
+	maxRetries := len(functionconfig.FixableValidationErrors)
+
+	for i := 0; i < maxRetries; i++ {
+		if err == nil {
+			return nil
+		}
+		if isFixed := ap.AutoFixConfiguration(ctx, err, functionConfig); isFixed {
+			err = ap.platform.ValidateFunctionConfig(ctx, functionConfig)
+		} else {
+			return errors.Wrap(err, functionValidationFailedErr)
+		}
+	}
+	if err != nil {
+		return errors.Wrap(err, functionValidationFailedErr)
+	}
 	return nil
 }
 
@@ -716,13 +811,31 @@ func (ap *Platform) EnrichCreateProjectConfig(createProjectOptions *platform.Cre
 		createProjectOptions.ProjectConfig.Spec.Owner = createProjectOptions.AuthSession.GetUsername()
 	}
 
+	if ap.Config.ProjectsLeader != nil && createProjectOptions.RequestOrigin == ap.Config.ProjectsLeader.Kind {
+
+		// to align with the leaders (that allow invalid k8s labels), we just ignore the project's invalid labels
+		// instead of failing validation later on
+		createProjectOptions.ProjectConfig.Meta.Labels = common.FilterInvalidLabels(createProjectOptions.ProjectConfig.Meta.Labels)
+	}
+
 	return nil
 }
 
 // ValidateProjectConfig perform validation on a given project config
 func (ap *Platform) ValidateProjectConfig(projectConfig *platform.ProjectConfig) error {
+
 	if projectConfig.Meta.Name == "" {
 		return nuclio.NewErrBadRequest("Project name cannot be empty")
+	}
+
+	// validate project labels
+	if err := common.ValidateLabels(projectConfig.Meta.Labels); err != nil {
+		return errors.Wrap(err, "Project labels validation failed")
+	}
+
+	// validate default node selector
+	if err := common.ValidateLabels(projectConfig.Spec.DefaultFunctionNodeSelector); err != nil {
+		return errors.Wrap(err, "Default function node selector validation failed")
 	}
 
 	// project name should adhere Kubernetes label restrictions
@@ -734,6 +847,31 @@ func (ap *Platform) ValidateProjectConfig(projectConfig *platform.ProjectConfig)
 				joinedErrorMessage))
 	}
 	return nil
+}
+
+func (ap *Platform) GetFunctionProject(ctx context.Context, functionConfig *functionconfig.Config) (platform.Project, error) {
+	projectName, err := functionConfig.GetProjectName()
+	if err != nil {
+		return nil, errors.Wrap(err, "Could not enrich project name")
+	}
+	getProjectsOptions := &platform.GetProjectsOptions{
+		Meta: platform.ProjectMeta{
+			Name:      projectName,
+			Namespace: functionConfig.Meta.Namespace,
+		},
+	}
+	projects, err := ap.platform.GetProjects(ctx, getProjectsOptions)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to get projects")
+	}
+	switch len(projects) {
+	case 1:
+		return projects[0], nil
+	case 0:
+		return nil, errors.Wrap(err, "Project was not found for given function")
+	default:
+		return nil, errors.Wrap(err, "More than one project were found for given function")
+	}
 }
 
 // UpdateProject will update a previously existing project
@@ -896,6 +1034,10 @@ func (ap *Platform) GetScaleToZeroConfiguration() *platformconfig.ScaleToZero {
 	return nil
 }
 
+func (ap *Platform) GetDisableDefaultHttpTrigger() bool {
+	return ap.Config.DisableDefaultHTTPTrigger
+}
+
 // GetAllowedAuthenticationModes returns allowed authentication modes
 func (ap *Platform) GetAllowedAuthenticationModes() []string {
 	return nil
@@ -952,9 +1094,19 @@ func (ap *Platform) GetDefaultRegistryCredentialsSecretName() string {
 	return ap.ContainerBuilder.GetDefaultRegistryCredentialsSecretName()
 }
 
+func (ap *Platform) GetRegistryKind() string {
+	if ap.ContainerBuilder != nil {
+		return ap.ContainerBuilder.GetRegistryKind()
+	}
+	return ap.GetConfig().ContainerBuilderConfiguration.RegistryKind
+}
+
 // GetContainerBuilderKind returns the container-builder kind
 func (ap *Platform) GetContainerBuilderKind() string {
-	return ap.ContainerBuilder.GetKind()
+	if ap.ContainerBuilder != nil {
+		return ap.ContainerBuilder.GetKind()
+	}
+	return ap.GetConfig().ContainerBuilderConfiguration.Kind
 }
 
 // GetRuntimeBuildArgs returns the runtime specific build arguments
@@ -1172,6 +1324,20 @@ func (ap *Platform) QueryOPAFunctionPermissions(projectName,
 		permissionOptions)
 }
 
+func (ap *Platform) QueryOPAFunctionRedeployPermissions(projectName,
+	functionName string,
+	permissionOptions *opa.PermissionOptions) (bool, error) {
+	if projectName == "" {
+		projectName = "*"
+	}
+	if functionName == "" {
+		functionName = "*"
+	}
+	return ap.queryOPAPermissions(opa.GenerateFunctionRedeployResourceString(projectName, functionName),
+		opa.ActionCreate,
+		permissionOptions)
+}
+
 func (ap *Platform) QueryOPAFunctionEventPermissions(projectName,
 	functionName,
 	functionEventName string,
@@ -1196,40 +1362,6 @@ func (ap *Platform) QueryOPAMultipleResources(ctx context.Context,
 	action opa.Action,
 	permissionOptions *opa.PermissionOptions) ([]bool, error) {
 	return ap.queryOPAPermissionsMultiResources(ctx, resources, action, permissionOptions)
-}
-
-// GetFunctionSecrets returns all the function's secrets
-func (ap *Platform) GetFunctionSecrets(ctx context.Context, functionName, functionNamespace string) ([]platform.FunctionSecret, error) {
-	return nil, nil
-}
-
-// GetFunctionSecretMap returns a map of function sensitive data
-func (ap *Platform) GetFunctionSecretMap(ctx context.Context, functionName, functionNamespace string) (map[string]string, error) {
-
-	// get existing function secret
-	ap.Logger.DebugWithCtx(ctx,
-		"Getting function secret", "functionName",
-		functionName, "functionNamespace", functionNamespace)
-	functionSecretData, err := ap.platform.GetFunctionSecretData(ctx, functionName, functionNamespace)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to get function secret")
-	}
-
-	// if secret exists, get the data
-	if functionSecretData != nil {
-		functionSecretMap, err := ap.Scrubber.DecodeSecretData(functionSecretData)
-		if err != nil {
-			return nil, errors.Wrap(err, "Failed to decode function secret data")
-		}
-		return functionSecretMap, nil
-	}
-
-	// secret doesn't exist
-	ap.Logger.DebugWithCtx(ctx,
-		"Function secret doesn't exist",
-		"functionName", functionName,
-		"functionNamespace", functionNamespace)
-	return nil, nil
 }
 
 func (ap *Platform) functionBuildRequired(functionConfig *functionconfig.Config) (bool, error) {
@@ -1342,24 +1474,6 @@ func (ap *Platform) validateMinMaxReplicas(functionConfig *functionconfig.Config
 	return nil
 }
 
-func (ap *Platform) validateNodeSelector(functionConfig *functionconfig.Config) error {
-	for labelKey, labelValue := range functionConfig.Spec.NodeSelector {
-		if errs := validation.IsValidLabelValue(labelValue); len(errs) > 0 {
-			errs = append([]string{fmt.Sprintf("Invalid value: %s", labelValue)}, errs...)
-			return nuclio.NewErrBadRequest(strings.Join(errs, ", "))
-		}
-
-		// Valid label keys have two segments: an optional prefix and name, separated by a slash (/).
-		// The name segment is required and must conform to the rules of a valid label value.
-		// The prefix is optional. If specified, the prefix must be a DNS subdomain.
-		if errs := validation.IsQualifiedName(labelKey); len(errs) > 0 {
-			errs = append([]string{fmt.Sprintf("Invalid key: %s", labelKey)}, errs...)
-			return nuclio.NewErrBadRequest(strings.Join(errs, ", "))
-		}
-	}
-	return nil
-}
-
 func (ap *Platform) validatePriorityClassName(functionConfig *functionconfig.Config) error {
 
 	// function uses default class name
@@ -1375,6 +1489,16 @@ func (ap *Platform) validatePriorityClassName(functionConfig *functionconfig.Con
 			"Priority class name `%s` is not in valid priority class names list: [%s]",
 			functionConfig.Spec.PriorityClassName,
 			strings.Join(ap.Config.Kube.ValidFunctionPriorityClassNames, ", ")))
+	}
+	return nil
+}
+
+func (ap *Platform) validateScaleToZero(functionConfig *functionconfig.Config) error {
+	if functionConfig.Spec.MinReplicas != nil && *functionConfig.Spec.MinReplicas == 0 &&
+		functionConfig.Spec.DisableDefaultHTTPTrigger != nil && *functionConfig.Spec.DisableDefaultHTTPTrigger &&
+		len(functionconfig.GetTriggersByKind(functionConfig.Spec.Triggers, "http")) == 0 {
+		return errors.New("Function can not be scaling to zero without http trigger. " +
+			"Either enable default http trigger creation or create custom http trigger")
 	}
 	return nil
 }
@@ -1502,6 +1626,10 @@ func (ap *Platform) validateTriggers(functionConfig *functionconfig.Config) erro
 		return errors.Wrap(err, "Ingresses validation failed")
 	}
 
+	if err := ap.validateBatchConfiguration(functionConfig); err != nil {
+		return nuclio.WrapErrBadRequest(err)
+	}
+
 	for triggerKey, triggerInstance := range functionConfig.Spec.Triggers {
 
 		// do not allow trigger with empty name
@@ -1516,11 +1644,11 @@ func (ap *Platform) validateTriggers(functionConfig *functionconfig.Config) erro
 		}
 
 		// no more workers than limitation allows
-		if triggerInstance.MaxWorkers > trigger.MaxWorkersLimit {
-			return nuclio.NewErrBadRequest(fmt.Sprintf("MaxWorkers value for %s trigger (%d) exceeds the limit of %d",
+		if triggerInstance.NumWorkers > trigger.NumWorkersLimit {
+			return nuclio.NewErrBadRequest(fmt.Sprintf("NumWorkers value for %s trigger (%d) exceeds the limit of %d",
 				triggerKey,
-				triggerInstance.MaxWorkers,
-				trigger.MaxWorkersLimit))
+				triggerInstance.NumWorkers,
+				trigger.NumWorkersLimit))
 		}
 
 		// no more than one http trigger is allowed
@@ -1533,16 +1661,72 @@ func (ap *Platform) validateTriggers(functionConfig *functionconfig.Config) erro
 		}
 
 		// explicit ack is only allowed for Static Allocation mode
-		if triggerInstance.Kind == "kafka-cluster" {
-			if workerAllocationMode, exists := functionConfig.Meta.Annotations["nuclio.io/kafka-worker-allocation-mode"]; exists {
-				if partitionworker.AllocationMode(workerAllocationMode) != partitionworker.AllocationModeStatic &&
-					functionconfig.ExplicitAckEnabled(triggerInstance.ExplicitAckMode) {
-					return nuclio.NewErrBadRequest("Explicit ack mode is not allowed when using worker pool allocation mode")
+		if lo.Contains[string]([]string{"v3io-stream", "v3ioStream", "kafka-cluster", "kafka"}, triggerInstance.Kind) {
+			triggerKindPrefix := ""
+			if strings.Contains(triggerInstance.Kind, "v3io") {
+				triggerKindPrefix = "v3iostream"
+			} else {
+				triggerKindPrefix = "kafka"
+			}
+			workerAllocationMode := ""
+			annotationKey := fmt.Sprintf("nuclio.io/%s-worker-allocation-mode", triggerKindPrefix)
+
+			// check if worker allocation mode is set in function config annotations and attributes,
+			// priority is given to the attribute
+			if workerAllocationModeAnnotation, exists := functionConfig.Meta.Annotations[annotationKey]; exists {
+				workerAllocationMode = workerAllocationModeAnnotation
+			}
+			if workerAllocationModeAttribute, exists := triggerInstance.Attributes["workerAllocationMode"]; exists {
+				workerAllocationMode = workerAllocationModeAttribute.(string)
+			}
+			if workerAllocationMode != "" &&
+				partitionworker.AllocationMode(workerAllocationMode) != partitionworker.AllocationModeStatic &&
+				functionconfig.ExplicitAckEnabled(triggerInstance.ExplicitAckMode) {
+				return nuclio.NewErrBadRequest("Explicit ack mode is not allowed when using worker pool allocation mode")
+			}
+		}
+
+		// validate trigger supports autoscaling
+		if lo.Contains[string]([]string{"v3io-stream", "v3ioStream"}, triggerInstance.Kind) {
+
+			// V3IO stream trigger does not support autoscaling, so min and max replicas must be equal
+			minReplicas := functionConfig.Spec.MinReplicas
+			maxReplicas := functionConfig.Spec.MaxReplicas
+			if minReplicas != nil {
+				if maxReplicas != nil && *minReplicas != *maxReplicas {
+					return nuclio.NewErrBadRequest("V3IO Stream trigger does not support autoscaling")
 				}
 			}
 		}
 	}
 
+	return nil
+}
+
+func (ap *Platform) validateBatchConfiguration(functionConfig *functionconfig.Config) error {
+
+	for _, triggerInstance := range functionConfig.Spec.Triggers {
+		if triggerInstance.Batch == nil {
+			continue
+		}
+		if functionconfig.BatchModeEnabled(triggerInstance.Batch) &&
+			!functionconfig.TriggerKindSupportsBatching(triggerInstance.Kind) {
+			ap.Logger.WarnWith("Batching is not supported for given trigger kind - batching configuration is ignored",
+				"triggerKind", triggerInstance.Kind)
+		}
+		if functionconfig.BatchModeEnabled(triggerInstance.Batch) &&
+			!functionconfig.RuntimeSupportsBatching(functionConfig.Spec.Runtime) {
+			ap.Logger.WarnWith("Batching is not supported for given runtime - batching configuration is ignored",
+				"runtime", functionConfig.Spec.Runtime)
+		}
+
+		if triggerInstance.Batch.BatchSize <= 0 {
+			return nuclio.NewErrBadRequest("Batch size should be 1 or higher")
+		}
+		if _, err := time.ParseDuration(triggerInstance.Batch.Timeout); err != nil {
+			return nuclio.NewErrBadRequest(fmt.Sprintf("Batching timeout validation failed. Error: %s", err.Error()))
+		}
+	}
 	return nil
 }
 
@@ -1595,6 +1779,10 @@ func (ap *Platform) enrichTriggers(ctx context.Context, functionConfig *function
 		return errors.Wrap(err, "Failed to enrich explicit ack params")
 	}
 
+	if err := ap.enrichBatchParams(ctx, functionConfig); err != nil {
+		return errors.Wrap(err, "Failed to enrich batch params")
+	}
+
 	for triggerName, triggerInstance := range functionConfig.Spec.Triggers {
 
 		// if name was not given, inherit its key
@@ -1602,15 +1790,24 @@ func (ap *Platform) enrichTriggers(ctx context.Context, functionConfig *function
 			triggerInstance.Name = triggerName
 		}
 
+		// replace deprecated MaxWorkers with NumWorkers
+		// TODO: remove in 1.15.x
+		// nolint: staticcheck
+		if triggerInstance.NumWorkers == 0 && triggerInstance.MaxWorkers != 0 {
+			ap.Logger.WarnWithCtx(ctx, "MaxWorkers is deprecated and will be removed in v1.15.x, use NumWorkers instead")
+			triggerInstance.NumWorkers = triggerInstance.MaxWorkers
+		}
+
 		// ensure having max workers
 		if common.StringInSlice(triggerInstance.Kind, []string{"http", "v3ioStream"}) {
-			if triggerInstance.MaxWorkers == 0 {
-				triggerInstance.MaxWorkers = 1
+			if triggerInstance.NumWorkers == 0 {
+				triggerInstance.NumWorkers = 1
 			}
 		}
 
 		functionConfig.Spec.Triggers[triggerName] = triggerInstance
 	}
+
 	return nil
 }
 
@@ -1626,6 +1823,16 @@ func (ap *Platform) enrichExplicitAckParams(ctx context.Context, functionConfig 
 			triggerInstance.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
 		}
 
+		if triggerInstance.ExplicitAckMode != functionconfig.ExplicitAckModeDisable &&
+			!functionconfig.RuntimeSupportExplicitAck(functionConfig.Spec.Runtime) {
+			ap.Logger.WarnWith("Explicit Ack is not supported for the configured runtime. "+
+				"Setting explicitAck mode to `disable`",
+				"functionName", functionConfig.Meta.Name,
+				"runtime", functionConfig.Spec.Runtime,
+				"trigger", triggerName)
+			triggerInstance.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+		}
+
 		if triggerInstance.WorkerTerminationTimeout == "" {
 			triggerInstance.WorkerTerminationTimeout = functionconfig.DefaultWorkerTerminationTimeout
 		}
@@ -1633,6 +1840,39 @@ func (ap *Platform) enrichExplicitAckParams(ctx context.Context, functionConfig 
 		functionConfig.Spec.Triggers[triggerName] = triggerInstance
 	}
 
+	return nil
+}
+
+func (ap *Platform) enrichBatchParams(ctx context.Context, functionConfig *functionconfig.Config) error {
+	for triggerName, triggerInstance := range functionConfig.Spec.Triggers {
+		// skip batch configuration enrichment if it wasn't set
+		if triggerInstance.Batch == nil {
+			continue
+		}
+		// if batch mode is enabled, check batching parameters
+		if functionconfig.BatchModeEnabled(triggerInstance.Batch) {
+			ap.Logger.DebugWithCtx(ctx, "Enriching batch params for function trigger",
+				"functionName", functionConfig.Meta.Name,
+				"trigger", triggerName)
+			// if batch size isn't set, set it to default
+			if triggerInstance.Batch.BatchSize == 0 {
+				ap.Logger.DebugWithCtx(ctx, "Enriching batch size for function trigger",
+					"functionName", functionConfig.Meta.Name,
+					"trigger", triggerName,
+					"batchSize", functionconfig.DefaultBatchSize)
+				triggerInstance.Batch.BatchSize = functionconfig.DefaultBatchSize
+			}
+
+			// if timeout isn't set, set it to default
+			if triggerInstance.Batch.Timeout == "" {
+				ap.Logger.DebugWithCtx(ctx, "Enriching batching timeout for function trigger",
+					"functionName", functionConfig.Meta.Name,
+					"trigger", triggerName,
+					"batchTimeout", functionconfig.DefaultBatchTimeout)
+				triggerInstance.Batch.Timeout = functionconfig.DefaultBatchTimeout
+			}
+		}
+	}
 	return nil
 }
 
@@ -1764,6 +2004,11 @@ func (ap *Platform) enrichEnvVars(config *functionconfig.Config) {
 				if !common.EnvInSlice(newEnvVar, config.Spec.Env) {
 					config.Spec.Env = append(config.Spec.Env, newEnvVar)
 				}
+			}
+			// If EnvFrom is set in the platform config, add the EnvFrom object at the beginning of the list of EnvFrom in the function config.
+			// We add it at the beginning so that the values in the function config take priority over those in the platform config.
+			if len(ap.Config.Runtime.Common.EnvFrom) > 0 {
+				config.Spec.EnvFrom = append(ap.Config.Runtime.Common.EnvFrom, config.Spec.EnvFrom...)
 			}
 		}
 	}

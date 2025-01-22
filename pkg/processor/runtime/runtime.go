@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,6 +35,9 @@ type Runtime interface {
 	// ProcessEvent receives the event and processes it at the specific runtime
 	ProcessEvent(event nuclio.Event, functionLogger logger.Logger) (interface{}, error)
 
+	// ProcessBatch receives the event batch and processes it at the specific runtime
+	ProcessBatch(batch []nuclio.Event, functionLogger logger.Logger) ([]*ResponseWithErrors, error)
+
 	// GetFunctionLogger returns the function logger
 	GetFunctionLogger() logger.Logger
 
@@ -62,7 +65,13 @@ type Runtime interface {
 	// SupportsRestart return true if the runtime supports restart
 	SupportsRestart() bool
 
-	// Terminate sends a signal to the runtime process and waits for it to exit
+	// Drain signals to the runtime process to drain its accumulated events and waits for it to finish
+	Drain() error
+
+	// Continue signals the runtime process to continue event processing
+	Continue() error
+
+	// Terminate signals to the runtime process that processor is about to stop working
 	Terminate() error
 
 	// GetControlMessageBroker returns the control message broker
@@ -71,14 +80,13 @@ type Runtime interface {
 
 // AbstractRuntime is the base for all runtimes
 type AbstractRuntime struct {
-	Logger               logger.Logger
-	FunctionLogger       logger.Logger
-	Context              *nuclio.Context
-	Statistics           Statistics
-	ControlMessageBroker controlcommunication.ControlMessageBroker
-	databindings         map[string]databinding.DataBinding
-	configuration        *Configuration
-	status               status.Status
+	Logger         logger.Logger
+	FunctionLogger logger.Logger
+	Context        *nuclio.Context
+	Statistics     Statistics
+	databindings   map[string]databinding.DataBinding
+	configuration  *Configuration
+	status         *status.SafeStatus
 }
 
 // NewAbstractRuntime creates a new abstract runtime
@@ -109,9 +117,8 @@ func NewAbstractRuntime(logger logger.Logger, configuration *Configuration) (*Ab
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create context")
 	}
-
 	// set the initial status
-	newAbstractRuntime.status = status.Initializing
+	newAbstractRuntime.status = status.NewSafeStatus(status.Initializing)
 
 	return &newAbstractRuntime, nil
 }
@@ -133,12 +140,12 @@ func (ar *AbstractRuntime) GetStatistics() *Statistics {
 
 // SetStatus sets the runtime's reported status
 func (ar *AbstractRuntime) SetStatus(newStatus status.Status) {
-	ar.status = newStatus
+	ar.status.SetStatus(newStatus)
 }
 
 // GetStatus returns the runtime's reported status
 func (ar *AbstractRuntime) GetStatus() status.Status {
-	return ar.status
+	return ar.status.GetStatus()
 }
 
 // Start starts the runtime, or does nothing if the runtime does not require starting (e.g. Go and shell runtimes)
@@ -173,7 +180,25 @@ func (ar *AbstractRuntime) GetEnvFromConfiguration() []string {
 
 // GetControlMessageBroker returns the control message broker
 func (ar *AbstractRuntime) GetControlMessageBroker() controlcommunication.ControlMessageBroker {
-	return ar.ControlMessageBroker
+	return ar.configuration.ControlMessageBroker
+}
+
+// Stop stops the runtime
+func (ar *AbstractRuntime) Stop() error {
+	ar.SetStatus(status.Stopped)
+	return nil
+}
+
+func (ar *AbstractRuntime) Drain() error {
+	return nil
+}
+
+func (ar *AbstractRuntime) Terminate() error {
+	return nil
+}
+
+func (ar *AbstractRuntime) Continue() error {
+	return nil
 }
 
 func (ar *AbstractRuntime) createAndStartDataBindings(parentLogger logger.Logger,
@@ -245,14 +270,4 @@ func (ar *AbstractRuntime) createContext(parentLogger logger.Logger,
 	}
 
 	return newContext, nil
-}
-
-// Stop stops the runtime
-func (ar *AbstractRuntime) Stop() error {
-	ar.SetStatus(status.Stopped)
-	return nil
-}
-
-func (ar *AbstractRuntime) Terminate() error {
-	return nil
 }

@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,14 +29,16 @@ import (
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
 	"github.com/nuclio/nuclio/pkg/processor/trigger"
-	// load cron trigger for tests purposes
-	_ "github.com/nuclio/nuclio/pkg/processor/trigger/cron"
 	"github.com/nuclio/nuclio/pkg/processor/worker"
 
 	"github.com/nuclio/logger"
+	"github.com/nuclio/nuclio-sdk-go"
 	nucliozap "github.com/nuclio/zap"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+
+	// load cron trigger for tests purposes
+	_ "github.com/nuclio/nuclio/pkg/processor/trigger/cron"
 )
 
 type TriggerTestSuite struct {
@@ -229,6 +231,29 @@ func (t *testTrigger) GetProjectName() string {
 func (t *testTrigger) TimeoutWorker(worker *worker.Worker) error {
 	t.Called(worker)
 	return nil
+}
+
+func (t *testTrigger) SignalWorkersToDrain() error {
+	t.Called()
+	return nil
+}
+
+func (t *testTrigger) SignalWorkersToTerminate() error {
+	t.Called()
+	return nil
+}
+
+func (t *testTrigger) SignalWorkersToContinue() error {
+	t.Called()
+	return nil
+}
+
+func (t *testTrigger) PreBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker) {
+	t.Called(batch, workerInstance)
+}
+
+func (t *testTrigger) PostBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker) {
+	t.Called(batch, workerInstance)
 }
 
 func TestTriggerTestSuite(t *testing.T) {

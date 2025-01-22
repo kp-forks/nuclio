@@ -1,6 +1,6 @@
 # Deploying Functions from a Dockerfile
 
-This tutorial guides you through the process of deploying functions whose build process is solely defined in a user-supplied Dockerfile. The tutorial assumes that you followed the [source-based deployment tutorial](/docs/tasks/deploying-functions.md), which provides an introduction to function signatures, configuration, and more.
+This tutorial guides you through the process of deploying functions whose build process is solely defined in a user-supplied Dockerfile. The tutorial assumes that you followed the [source-based deployment tutorial](../tasks/deploying-functions.md), which provides an introduction to function signatures, configuration, and more.
 
 #### In this document
 
@@ -30,7 +30,7 @@ Create an empty directory in your preferred location. Then, download a simple Go
 curl -LO https://raw.githubusercontent.com/nuclio/nuclio/master/hack/examples/golang/helloworld/helloworld.go
 ```
 
-Now, create a Dockerfile by following the guidelines in the [Go reference](/docs/reference/runtimes/golang/golang-reference.md#dockerfile).
+Now, create a Dockerfile by following the guidelines in the [Go reference](../reference/runtimes/golang/golang-reference.md#dockerfile).
 
 > **Note:** Future versions of `nuctl` will automate creating these blueprints through something like `nuctl create blueprint --runtime python`, which will create a Dockerfile, a **function.yaml** file, and an empty Python handler.
 
@@ -39,7 +39,7 @@ The Dockerfile will look something like this:
 ```
 ARG NUCLIO_LABEL=latest
 ARG NUCLIO_ARCH=amd64
-ARG NUCLIO_BASE_IMAGE=alpine:3.15
+ARG NUCLIO_BASE_IMAGE=alpine:3.20
 ARG NUCLIO_ONBUILD_IMAGE=nuclio/handler-builder-golang-onbuild:${NUCLIO_LABEL}-${NUCLIO_ARCH}-alpine
 
 # Supplies processor uhttpc, used for healthcheck
@@ -66,7 +66,7 @@ CMD [ "processor" ]
 This multi-stage Dockerfile uses three `FROM` directives:
 
 1. `FROM nuclio/uhttpc:0.0.1-amd64` - used for providing an [open-source health-check related binary](https://github.com/nuclio/uhttpc) (basically, a self contained curl). This is used for the "local" platform. You don't need this or the `HEALTHCHECK` platform if you plan on running only on Kubernetes.
-2. `FROM alpine:3.15` - the base image on which the final processor image will run.
+2. `FROM alpine:3.20` - the base image on which the final processor image will run.
 3. `FROM nuclio/handler-builder-golang-onbuild` - this is where it gets interesting: while every runtime needs the processor binary, each runtime must also provide a unique set of artifacts. Interpreter-based runtimes, like Python and NodeJS, simply need to provide the shim layer and the user's code. However, compiled runtimes (Go, Java, .NET Core) must compile the user's code into a binary. This is done with a set of `ONBUILD` directives in the `onbuild` image. You provide the source, and the base image will do everything that is required to provide you with the artifact at the expected location. In this tutorial, by simply using `FROM nuclio/handler-builder-golang-onbuild` and providing Go source code, you will build a Go plugin that will reside at `/opt/nuclio/handler.so`. All you have to do is copy the plugin to the proper location in you final processor image.
 
 It is up to you to customize this Dockerfile, if you so choose (for example, by adding `RUN` directives that add dependencies), but all provided Dockerfiles are ready to go. Go ahead and build the function; you only need the **Dockerfile** and **helloworld.go**:
@@ -75,11 +75,11 @@ It is up to you to customize this Dockerfile, if you so choose (for example, by 
 docker build -t helloworld-from-df .
 ```
 
-> **Note:** Each runtime has a different Dockerfile. Consult the appropriate [runtime reference documents](/docs/reference/runtimes) to understand the specific nuances.
+> **Note:** Each runtime has a different Dockerfile. Consult the appropriate [runtime reference documents](../reference/runtimes/index) to understand the specific nuances.
 
 ## Deploying a function built with Docker
 
-Now that you have a function image, you can use Nuclio's ability to [deploy pre-built functions](/docs/tasks/deploying-pre-built-functions.md). This is no different than if you had used `nuctl build` to build the function image:
+Now that you have a function image, you can use Nuclio's ability to [deploy pre-built functions](../tasks/deploying-pre-built-functions.md). This is no different than if you had used `nuctl build` to build the function image:
 
 ```sh
 nuctl deploy helloworld --run-image helloworld-from-df:latest \
