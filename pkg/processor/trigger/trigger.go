@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/controlcommunication"
+	"github.com/nuclio/nuclio/pkg/processor/runtime"
 	"github.com/nuclio/nuclio/pkg/processor/worker"
 
 	"github.com/google/uuid"
@@ -34,7 +36,7 @@ import (
 )
 
 const (
-	MaxWorkersLimit                              = 100000
+	NumWorkersLimit                              = 100000
 	DefaultWorkerAvailabilityTimeoutMilliseconds = 10000 // 10 seconds
 )
 
@@ -83,6 +85,21 @@ type Trigger interface {
 
 	// TimeoutWorker times out a worker
 	TimeoutWorker(worker *worker.Worker) error
+
+	// SignalWorkersToDrain drains all workers
+	SignalWorkersToDrain() error
+
+	// SignalWorkersToContinue signal all workers to continue processing
+	SignalWorkersToContinue() error
+
+	// SignalWorkersToTerminate signal to all workers that the processor is about to stop working
+	SignalWorkersToTerminate() error
+
+	// PreBatchHooks does trigger-specific actions before sending a batch
+	PreBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker)
+
+	// PostBatchHooks does trigger-specific actions after sending a batch
+	PostBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker)
 }
 
 // AbstractTrigger implements common trigger operations
@@ -102,6 +119,7 @@ type AbstractTrigger struct {
 	FunctionName    string
 	ProjectName     string
 	restartChan     chan Trigger
+	Batcher         *Batcher
 }
 
 func NewAbstractTrigger(logger logger.Logger,
@@ -122,15 +140,7 @@ func NewAbstractTrigger(logger logger.Logger,
 		configuration.WorkerAvailabilityTimeoutMilliseconds = &defaultWorkerAvailabilityTimeoutMilliseconds
 	}
 
-	if configuration.RuntimeConfiguration.Meta.Labels == nil {
-
-		// backwards compatibility
-		configuration.RuntimeConfiguration.Meta.Labels = map[string]string{
-			common.NuclioResourceLabelKeyProjectName: "",
-		}
-	}
-
-	return AbstractTrigger{
+	trigger := AbstractTrigger{
 		Logger:          logger,
 		ID:              configuration.ID,
 		WorkerAllocator: allocator,
@@ -141,7 +151,11 @@ func NewAbstractTrigger(logger logger.Logger,
 		FunctionName:    configuration.RuntimeConfiguration.Meta.Name,
 		ProjectName:     configuration.RuntimeConfiguration.Meta.Labels[common.NuclioResourceLabelKeyProjectName],
 		restartChan:     restartTriggerChan,
-	}, nil
+	}
+	if functionconfig.BatchModeEnabled(configuration.Batch) {
+		trigger.Batcher = NewBatcher(logger, configuration.Batch.BatchSize)
+	}
+	return trigger, nil
 }
 
 // Initialize performs post creation initializations
@@ -176,7 +190,7 @@ func (at *AbstractTrigger) AllocateWorkerAndSubmitEvent(event nuclio.Event,
 	// allocate a worker
 	workerInstance, err := at.WorkerAllocator.Allocate(timeout)
 	if err != nil {
-		at.UpdateStatistics(false)
+		at.UpdateStatistics(false, 1)
 
 		return nil, errors.Wrap(err, "Failed to allocate worker"), nil
 	}
@@ -204,7 +218,7 @@ func (at *AbstractTrigger) AllocateWorkerAndSubmitEvents(events []nuclio.Event,
 	// allocate a worker
 	workerInstance, err := at.WorkerAllocator.Allocate(timeout)
 	if err != nil {
-		at.UpdateStatistics(false)
+		at.UpdateStatistics(false, 1)
 
 		return nil, errors.Wrap(err, "Failed to allocate worker"), nil
 	}
@@ -279,7 +293,7 @@ func (at *AbstractTrigger) HandleSubmitPanic(workerInstance *worker.Worker,
 			at.WorkerAllocator.Release(workerInstance)
 		}
 
-		at.UpdateStatistics(false)
+		at.UpdateStatistics(false, 1)
 	}
 }
 
@@ -296,7 +310,7 @@ func (at *AbstractTrigger) SubmitEventToWorker(functionLogger logger.Logger,
 	response, processError = workerInstance.ProcessEvent(event, functionLogger)
 
 	// increment statistics based on results. if process error is nil, we successfully handled
-	at.UpdateStatistics(processError == nil)
+	at.UpdateStatistics(processError == nil, 1)
 	return
 }
 
@@ -306,11 +320,11 @@ func (at *AbstractTrigger) TimeoutWorker(worker *worker.Worker) error {
 }
 
 // UpdateStatistics updates the trigger statistics
-func (at *AbstractTrigger) UpdateStatistics(success bool) {
+func (at *AbstractTrigger) UpdateStatistics(success bool, times uint64) {
 	if success {
-		atomic.AddUint64(&at.Statistics.EventsHandledSuccessTotal, 1)
+		atomic.AddUint64(&at.Statistics.EventsHandledSuccessTotal, times)
 	} else {
-		atomic.AddUint64(&at.Statistics.EventsHandledFailureTotal, 1)
+		atomic.AddUint64(&at.Statistics.EventsHandledFailureTotal, times)
 	}
 }
 
@@ -334,10 +348,57 @@ func (at *AbstractTrigger) SubscribeToControlMessageKind(kind controlcommunicati
 
 	for _, workerInstance := range at.WorkerAllocator.GetWorkers() {
 		if err := workerInstance.Subscribe(kind, controlMessageChan); err != nil {
-			return errors.Wrapf(err, "Failed to subscribe to explicit ack control message kind in worker %d", workerInstance.GetIndex())
+			return errors.Wrapf(err,
+				"Failed to subscribe to control message kind %s in worker %d",
+				kind,
+				workerInstance.GetIndex())
 		}
 	}
 
+	return nil
+}
+
+// UnsubscribeFromControlMessageKind unsubscribes all workers from control message kind
+func (at *AbstractTrigger) UnsubscribeFromControlMessageKind(kind controlcommunication.ControlMessageKind,
+	controlMessageChan chan *controlcommunication.ControlMessage) error {
+
+	at.Logger.DebugWith("Unsubscribing channel from control message kind",
+		"kind", kind,
+		"numWorkers", len(at.WorkerAllocator.GetWorkers()))
+
+	for _, workerInstance := range at.WorkerAllocator.GetWorkers() {
+		if err := workerInstance.Unsubscribe(kind, controlMessageChan); err != nil {
+			return errors.Wrapf(err,
+				"Failed to unsubscribe channel from control message kind %s in worker %d",
+				kind,
+				workerInstance.GetIndex())
+		}
+	}
+
+	return nil
+}
+
+// SignalWorkersToDrain sends a signal to all workers, telling them to drop or ack events
+// that are currently being processed
+func (at *AbstractTrigger) SignalWorkersToDrain() error {
+	if err := at.WorkerAllocator.SignalDraining(); err != nil {
+		return errors.Wrap(err, "Failed to signal all workers to drain events")
+	}
+	return nil
+}
+
+// SignalWorkersToContinue sends a signal to all workers, telling them to continue event processing
+func (at *AbstractTrigger) SignalWorkersToContinue() error {
+	if err := at.WorkerAllocator.SignalContinue(); err != nil {
+		return errors.Wrap(err, "Failed to signal all workers to continue event processing")
+	}
+	return nil
+}
+
+func (at *AbstractTrigger) SignalWorkersToTerminate() error {
+	if err := at.WorkerAllocator.SignalTermination(); err != nil {
+		return errors.Wrap(err, "Failed to signal all workers to terminate")
+	}
 	return nil
 }
 
@@ -376,7 +437,114 @@ func (at *AbstractTrigger) prepareEvent(event nuclio.Event, workerInstance *work
 	}
 
 	// Not a cloud event
-	event.SetID(nuclio.ID(uuid.New().String()))
+	// In batch-mode and cloud event an ID already exists at this point, so don't override it
+	if event.GetID() == "" {
+		event.SetID(nuclio.ID(uuid.New().String()))
+	}
 	event.SetTriggerInfoProvider(at)
 	return event, nil
+}
+
+func (at *AbstractTrigger) StartBatcher(batchTimeout time.Duration, workerAvailabilityTimeout time.Duration) {
+	for {
+		batch, responseChans := at.Batcher.WaitForBatch(batchTimeout)
+		at.Logger.Debug("Starting to process batch")
+
+		// allocate a worker
+		workerInstance, err := at.WorkerAllocator.Allocate(workerAvailabilityTimeout)
+		if err != nil {
+			at.UpdateStatistics(false, uint64(len(batch)))
+			workerError := errors.Wrap(err, "Failed to allocate worker")
+			for _, channel := range responseChans {
+				go channel.Write(at.Logger, &runtime.ResponseWithErrors{SubmitError: workerError})
+			}
+			return
+		}
+
+		at.Trigger.PreBatchHooks(batch, workerInstance)
+
+		// submit batch to the worker
+		at.SubmitBatchAndSendResponses(batch, responseChans, workerInstance)
+
+		at.Trigger.PostBatchHooks(batch, workerInstance)
+
+		// release worker when we're done
+		at.WorkerAllocator.Release(workerInstance)
+		at.Logger.Debug("Batch processing finished")
+	}
+}
+
+func (at *AbstractTrigger) PreBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker) {
+}
+
+func (at *AbstractTrigger) PostBatchHooks(batch []nuclio.Event, workerInstance *worker.Worker) {
+}
+
+func (at *AbstractTrigger) SubmitEventToBatch(event nuclio.Event) (chan interface{}, context.CancelFunc) {
+	responseChan := make(chan interface{})
+	cancelContext, cancelProcessing := context.WithCancel(context.Background())
+	at.Batcher.Add(event, &common.ChannelWithRecover{
+		Context: cancelContext,
+		Channel: responseChan,
+	})
+	return responseChan, cancelProcessing
+}
+
+func (at *AbstractTrigger) SubmitBatchAndSendResponses(batch []nuclio.Event, responseChans map[string]*common.ChannelWithRecover, workerInstance *worker.Worker) {
+	// prepare batch
+	preparedBatch := make([]nuclio.Event, 0)
+	for _, event := range batch {
+		preparedEvent, submitError := at.prepareEvent(event, workerInstance)
+
+		if submitError != nil {
+			// send error to the corresponding channel and delete the channel from the map so we won't send the response to it
+			channel, ok := responseChans[string(event.GetID())]
+			if ok {
+				go channel.Write(at.Logger, &runtime.ResponseWithErrors{SubmitError: submitError})
+				delete(responseChans, string(event.GetID()))
+			} else {
+				at.Logger.WarnWith("Response chan for event not found",
+					"event_id", event.GetID())
+			}
+			at.UpdateStatistics(false, 1)
+		} else {
+			preparedBatch = append(preparedBatch, preparedEvent)
+		}
+	}
+
+	// sending batch to the runtime
+	responses, err := workerInstance.ProcessEventBatch(preparedBatch)
+	if err != nil {
+		for _, channel := range responseChans {
+			go channel.Write(at.Logger, &runtime.ResponseWithErrors{ProcessError: err})
+		}
+		at.UpdateStatistics(false, uint64(len(responseChans)))
+		return
+	} else {
+		for _, response := range responses {
+			if response.EventId == "" {
+				at.Logger.WarnWith("Received in-batch response without event_id, response won't be returned")
+			}
+			channel, ok := responseChans[response.EventId]
+			if !ok {
+				at.Logger.WarnWith("channel for given event_id not in list", "event_id", response.EventId)
+			} else {
+				go channel.Write(at.Logger, response)
+				delete(responseChans, response.EventId)
+				if response.ProcessError != nil {
+					at.UpdateStatistics(false, 1)
+				} else {
+					at.UpdateStatistics(true, 1)
+				}
+			}
+		}
+	}
+
+	// check if there are any chans left in responseChans
+	if len(responseChans) > 0 {
+		at.Logger.DebugWith("After processing batch %d chans haven't received response, sending error to the chan")
+		for _, channel := range responseChans {
+			go channel.Write(at.Logger, &runtime.ResponseWithErrors{NoResponseError: runtime.ErrNoResponseFromBatchResponse})
+		}
+	}
 }

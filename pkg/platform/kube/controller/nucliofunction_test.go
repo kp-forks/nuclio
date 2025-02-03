@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	nuclioio "github.com/nuclio/nuclio/pkg/platform/kube/apis/nuclio.io/v1beta1"
 	"github.com/nuclio/nuclio/pkg/platform/kube/client/clientset/versioned/fake"
@@ -32,6 +33,7 @@ import (
 	"github.com/nuclio/logger"
 	nucliozap "github.com/nuclio/zap"
 	"github.com/stretchr/testify/suite"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -45,12 +47,14 @@ type NuclioFunctionTestSuite struct {
 	k8sClientSet      *k8sfake.Clientset
 	controller        *Controller
 	ctx               context.Context
+	projectName       string
 }
 
 func (suite *NuclioFunctionTestSuite) SetupTest() {
 	var err error
 	resyncInterval := 0 * time.Second
 	functionMonitoringInterval := 10 * time.Second
+	scalingGracePeriod := 2 * time.Minute
 	evictedPodsCleanupInterval := 30 * time.Minute
 	cronJobInterval := 10 * time.Second
 	defaultNumWorkers := 1
@@ -70,6 +74,13 @@ func (suite *NuclioFunctionTestSuite) SetupTest() {
 		suite.k8sClientSet,
 		suite.functionClientSet)
 	suite.Require().NoError(err)
+	suite.projectName = "default"
+	project := &nuclioio.NuclioProject{}
+	project.Name = suite.projectName
+	project.Namespace = suite.namespace
+
+	_, err = suite.functionClientSet.NuclioV1beta1().NuclioProjects(suite.namespace).Create(suite.ctx, project, metav1.CreateOptions{})
+	suite.Require().NoError(err)
 
 	suite.controller, err = NewController(suite.logger,
 		suite.namespace,
@@ -80,6 +91,7 @@ func (suite *NuclioFunctionTestSuite) SetupTest() {
 		nil,
 		resyncInterval,
 		functionMonitoringInterval,
+		scalingGracePeriod,
 		evictedPodsCleanupInterval,
 		cronJobInterval,
 		platformConfig,
@@ -99,6 +111,9 @@ func (suite *NuclioFunctionTestSuite) TestPreserveBuildLogs() {
 		{
 			"A": "B",
 		},
+	}
+	functionInstance.Labels = map[string]string{
+		common.NuclioResourceLabelKeyProjectName: suite.projectName,
 	}
 
 	suite.k8sClientSet.PrependReactor("create",
@@ -120,6 +135,9 @@ func (suite *NuclioFunctionTestSuite) TestRecoverFromPanic() {
 	functionInstance := &nuclioio.NuclioFunction{}
 	functionInstance.Name = "func-name"
 	functionInstance.Status.State = functionconfig.FunctionStateReady
+	functionInstance.Labels = map[string]string{
+		common.NuclioResourceLabelKeyProjectName: suite.projectName,
+	}
 
 	suite.k8sClientSet.PrependReactor("create",
 		"configmaps",

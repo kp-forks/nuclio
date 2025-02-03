@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,15 +44,8 @@ func main() {
 
 	resyncIntervalStr := flag.String("resync-interval", defaultResyncIntervalStr, "Set resync interval for the function operator (optional)")
 
-	// Deprecated: resync interval is commonly used by functions and api gateways
-	deprecatedResyncIntervalStr := flag.String("function-operator-resync-interval", "", "Deprecated. Use --resync-interval instread")
-	if deprecatedResyncIntervalStr != nil && *deprecatedResyncIntervalStr != "" {
-
-		// ignore value, write deprecation note to stderr
-		os.Stderr.WriteString("--function-operator-resync-interval has been deprecated in favor of --resync-interval.") // nolint: errcheck
-	}
-
 	functionMonitorIntervalStr := flag.String("function-monitor-interval", common.GetEnvOrDefaultString("NUCLIO_CONTROLLER_FUNCTION_MONITOR_INTERVAL", "3m"), "Set function monitor interval (optional)")
+	scalingGracePeriodStr := flag.String("scaling-grace-period", common.GetEnvOrDefaultString("NUCLIO_CONTROLLER_SCALING_GRACE_PERIOD", "3m"), "Set function scaling grace period (optional)")
 	cronJobStaleResourcesCleanupIntervalStr := flag.String("cron-job-stale-resources-cleanup-interval", common.GetEnvOrDefaultString("NUCLIO_CONTROLLER_CRON_JOB_STALE_RESOURCES_CLEANUP_INTERVAL", "1m"), "Set interval for the cleanup of stale cron job resources (optional)")
 	evictedPodsCleanupIntervalStr := flag.String("evicted-pods-cleanup-interval", common.GetEnvOrDefaultString("NUCLIO_CONTROLLER_EVICTED_PODS_CLEANUP_INTERVAL", "30m"), "Set interval for the cleanup of evicted function pods (optional)")
 	functionEventOperatorNumWorkersStr := flag.String("function-event-operator-num-workers", common.GetEnvOrDefaultString("NUCLIO_CONTROLLER_FUNCTION_EVENT_OPERATOR_NUM_WORKERS", "2"), "Set number of workers for the function event operator (optional)")
@@ -72,6 +65,7 @@ func main() {
 		*functionOperatorNumWorkersStr,
 		*resyncIntervalStr,
 		*functionMonitorIntervalStr,
+		*scalingGracePeriodStr,
 		*cronJobStaleResourcesCleanupIntervalStr,
 		*evictedPodsCleanupIntervalStr,
 		*functionEventOperatorNumWorkersStr,

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/nuclio/nuclio/pkg/auth"
+	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/dashboard"
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/restful"
@@ -55,6 +57,12 @@ func (r *resource) getNamespaceOrDefault(providedNamespace string) string {
 	return r.getDashboard().GetDefaultNamespace()
 }
 
+func (r *resource) getExportOptionsFromRequest(request *http.Request) *common.ExportFunctionOptions {
+	return &common.ExportFunctionOptions{
+		CleanupSpec: request.Header.Get(headers.SkipSpecCleanup) != "",
+	}
+}
+
 func (r *resource) getRequestAuthConfig(request *http.Request) (*platform.AuthConfig, error) {
 
 	// TODO: move as a middleware for specific routes
@@ -77,10 +85,6 @@ func (r *resource) getRequestAuthConfig(request *http.Request) (*platform.AuthCo
 	// if we're instructed to use our service account for auth (or something invalid), just don't populate the auth config. this is
 	// the default behavior
 	return nil, nil
-}
-
-func (r *resource) getListenAddress() string {
-	return r.getDashboard().ListenAddress
 }
 
 func (r *resource) headerValueIsTrue(request *http.Request, headerName string) bool {

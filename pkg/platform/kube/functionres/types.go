@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 
 	appsv1 "k8s.io/api/apps/v1"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -59,6 +59,9 @@ type Client interface {
 
 	// SetPlatformConfigurationProvider sets the provider of the platform configuration for any future access
 	SetPlatformConfigurationProvider(PlatformConfigurationProvider)
+
+	// UpdatedServiceSelectorWhenScaledFromZero updates node selector when scaling from zero when function is ready
+	UpdatedServiceSelectorWhenScaledFromZero(ctx context.Context, function *nuclioio.NuclioFunction) error
 }
 
 // Resources holds the resources a functionres holds

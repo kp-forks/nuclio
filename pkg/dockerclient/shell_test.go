@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -186,10 +186,11 @@ func (suite *ShellClientTestSuite) TestBuildBailOnUnknownError() {
 	suite.mockedCmdRunner.
 		On("Run",
 			mock.Anything,
-			mock.MatchedBy(func(command string) bool {
+			mock.Anything,
+			mock.MatchedBy(func(vars []interface{}) bool {
+				command := vars[0].(string)
 				return strings.Contains(command, "docker build")
-			}),
-			mock.Anything).
+			})).
 		Return(cmdrunner.RunResult{
 			Stderr: `some bad happened`,
 		}, errors.New("unexpected error")).
@@ -211,10 +212,11 @@ func (suite *ShellClientTestSuite) TestBuildRetryOnErrors() {
 	suite.mockedCmdRunner.
 		On("Run",
 			mock.Anything,
-			mock.MatchedBy(func(command string) bool {
+			mock.Anything,
+			mock.MatchedBy(func(vars []interface{}) bool {
+				command := vars[0].(string)
 				return strings.Contains(command, "docker build")
-			}),
-			mock.Anything).
+			})).
 		Return(cmdrunner.RunResult{
 			Stderr: `Unable to find image 'nuclio-onbuild-someid:sometag' locally`,
 		}, errors.New("execution error")).

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,16 @@ limitations under the License.
 package v3iostream
 
 import (
+	"time"
+
 	"github.com/nuclio/nuclio-sdk-go"
 	"github.com/v3io/v3io-go/pkg/dataplane"
 )
 
 type Event struct {
 	nuclio.AbstractEvent
-	record *v3io.StreamRecord
+	record     *v3io.StreamRecord
+	StreamPath string
 }
 
 func (e *Event) GetBody() []byte {
@@ -40,4 +43,12 @@ func (e *Event) GetShardID() int {
 
 func (e *Event) GetOffset() int {
 	return int(e.record.SequenceNumber)
+}
+
+func (e *Event) GetTimestamp() time.Time {
+	return time.Unix(int64(e.record.ArrivalTimeSec), int64(e.record.ArrivalTimeNSec))
+}
+
+func (e *Event) GetTopic() string {
+	return e.StreamPath
 }

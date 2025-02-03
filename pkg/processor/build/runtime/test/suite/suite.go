@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -33,8 +34,9 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/trigger/http/test/suite"
 	"github.com/nuclio/nuclio/test/httpsrv"
 
-	"github.com/mholt/archiver/v3"
+	"github.com/mholt/archiver/v4"
 	"github.com/nuclio/errors"
+	"k8s.io/api/core/v1"
 )
 
 type FunctionInfo struct {
@@ -50,7 +52,7 @@ type RuntimeSuite interface {
 
 type archiveInfo struct {
 	extension  string
-	compressor func([]string, string) error
+	compressor func(context.Context, io.Writer, []archiver.File) error
 }
 
 type TestSuite struct {
@@ -67,8 +69,11 @@ func (suite *TestSuite) SetupSuite() {
 	suite.ctx = context.Background()
 
 	suite.archiveInfos = []archiveInfo{
-		{".zip", archiver.DefaultZip.Archive},
-		{".tar.gz", archiver.DefaultTarGz.Archive},
+		{".zip", archiver.Zip{}.Archive},
+		{".tar.gz", archiver.CompressedArchive{
+			Compression: archiver.Gz{},
+			Archival:    archiver.Tar{},
+		}.Archive},
 	}
 }
 
@@ -167,14 +172,6 @@ func (suite *TestSuite) TestBuildArchiveFromURLWithCustomDir() {
 	for _, archiveInfo := range suite.archiveInfos {
 		suite.compressAndDeployFunctionFromURLWithCustomDir(archiveInfo.extension, archiveInfo.compressor)
 	}
-}
-
-func (suite *TestSuite) TestBuildArchiveFromGithub() {
-	// test only zip
-
-	extension := suite.archiveInfos[0].extension
-	compressor := suite.archiveInfos[0].compressor
-	suite.compressAndDeployFunctionFromGithub(extension, compressor)
 }
 
 func (suite *TestSuite) TestBuildFuncFromFunctionSourceCode() {
@@ -324,9 +321,19 @@ func (suite *TestSuite) DeployFunctionFromURL(createFunctionOptions *platform.Cr
 }
 
 func (suite *TestSuite) compressAndDeployFunctionFromURL(archiveExtension string,
-	compressor func([]string, string) error) {
+	compressor func(context.Context, io.Writer, []archiver.File) error) {
 
 	createFunctionOptions := suite.getDeployOptionsDir("reverser")
+	runAsUserID := int64(1000)
+	runAsGroupID := int64(2000)
+	fsGroup := int64(3000)
+
+	// setting security context to check that function can be run in non-root mode
+	createFunctionOptions.FunctionConfig.Spec.SecurityContext = &v1.PodSecurityContext{
+		RunAsUser:  &runAsUserID,
+		RunAsGroup: &runAsGroupID,
+		FSGroup:    &fsGroup,
+	}
 
 	archivePath := suite.createFunctionArchive(createFunctionOptions.FunctionConfig.Spec.Build.Path,
 		archiveExtension,
@@ -338,7 +345,7 @@ func (suite *TestSuite) compressAndDeployFunctionFromURL(archiveExtension string
 }
 
 func (suite *TestSuite) compressAndDeployFunctionFromURLWithCustomDir(archiveExtension string,
-	compressor func([]string, string) error) {
+	compressor func(context.Context, io.Writer, []archiver.File) error) {
 
 	createFunctionOptions := suite.getDeployOptionsDir("reverser")
 	createFunctionOptions.FunctionConfig.Spec.Build.CodeEntryAttributes = map[string]interface{}{
@@ -353,49 +360,6 @@ func (suite *TestSuite) compressAndDeployFunctionFromURLWithCustomDir(archiveExt
 	defer os.Remove(archivePath) // nolint: errcheck
 
 	suite.compressAndDeployFunctionWithCodeEntryOptions(archivePath, createFunctionOptions)
-}
-
-func (suite *TestSuite) compressAndDeployFunctionFromGithub(archiveExtension string,
-	compressor func([]string, string) error) {
-
-	branch := "master"
-	createFunctionOptions := suite.getDeployOptionsDir("reverser")
-
-	// get the parent directory, and archive it just like github does
-	parentPath := filepath.Dir(createFunctionOptions.FunctionConfig.Spec.Build.Path)
-	archivePath := suite.createFunctionArchive(parentPath,
-		archiveExtension,
-		suite.ArchivePattern,
-		compressor)
-	defer os.Remove(archivePath) // nolint: errcheck
-
-	// create a path like it would have been created by github
-	pathToFunction := "/some/repo"
-
-	// start an HTTP server to serve the reverser py
-	httpServer, err := httpsrv.NewServer("", []httpsrv.ServedFile{
-		{
-			LocalPath: archivePath,
-			Pattern:   fmt.Sprintf("%s/archive/%s.zip", pathToFunction, branch),
-		},
-	}, nil)
-
-	suite.Require().NoError(err)
-	defer httpServer.Stop() // nolint: errcheck
-
-	createFunctionOptions.FunctionConfig.Spec.Build.Path = fmt.Sprintf("http://%s%s",
-		httpServer.Addr,
-		pathToFunction)
-
-	createFunctionOptions.FunctionConfig.Spec.Build.CodeEntryType = build.GithubEntryType
-	createFunctionOptions.FunctionConfig.Spec.Build.CodeEntryAttributes = map[string]interface{}{"branch": branch}
-
-	suite.DeployFunctionAndRequest(createFunctionOptions,
-		&httpsuite.Request{
-			RequestMethod:        "POST",
-			RequestBody:          "abcdef",
-			ExpectedResponseBody: "fedcba",
-		})
 }
 
 func (suite *TestSuite) compressAndDeployFunctionWithCodeEntryOptions(archivePath string,
@@ -435,7 +399,7 @@ func (suite *TestSuite) getDeployOptionsDir(functionName string) *platform.Creat
 	return createFunctionOptions
 }
 
-func (suite *TestSuite) compressAndDeployFunction(archiveExtension string, compressor func([]string, string) error) {
+func (suite *TestSuite) compressAndDeployFunction(archiveExtension string, compressor func(context.Context, io.Writer, []archiver.File) error) {
 	createFunctionOptions := suite.getDeployOptionsDir("reverser")
 
 	archivePath := suite.createFunctionArchive(createFunctionOptions.FunctionConfig.Spec.Build.Path,
@@ -458,7 +422,7 @@ func (suite *TestSuite) compressAndDeployFunction(archiveExtension string, compr
 func (suite *TestSuite) createFunctionArchive(functionDir string,
 	archiveExtension string,
 	archivePattern string,
-	compressor func([]string, string) error) string {
+	compressor func(context.Context, io.Writer, []archiver.File) error) string {
 
 	// create a temp directory that will hold the archive
 	archiveDir, err := os.MkdirTemp("", "build-zip-*")
@@ -466,22 +430,28 @@ func (suite *TestSuite) createFunctionArchive(functionDir string,
 
 	// use the reverse function
 	archivePath := path.Join(archiveDir, "reverser"+archiveExtension)
+	archiveFile, err := os.Create(archivePath)
+	suite.Require().NoError(err)
+	defer archiveFile.Close() // nolint: errcheck
 
 	functionFileInfos, err := os.ReadDir(functionDir)
 	suite.Require().NoError(err)
 
-	var functionFileNames []string
+	functionFileNames := map[string]string{}
 	for _, functionFileInfo := range functionFileInfos {
 		matched, err := regexp.MatchString(archivePattern, functionFileInfo.Name())
 		suite.Require().NoError(err)
 
 		if matched {
-			functionFileNames = append(functionFileNames, path.Join(functionDir, functionFileInfo.Name()))
+			// put the file in the root of the archive
+			functionFileNames[path.Join(functionDir, functionFileInfo.Name())] = ""
 		}
 	}
 
 	// create the archive
-	err = compressor(functionFileNames, archivePath)
+	files, err := archiver.FilesFromDisk(nil, functionFileNames)
+	suite.Require().NoError(err)
+	err = compressor(suite.ctx, archiveFile, files)
 	suite.Require().NoError(err)
 
 	return archivePath

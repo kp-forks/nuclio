@@ -9,7 +9,7 @@
 
 ## Overview
 
-If you followed the [Getting Started with Nuclio on Kubernetes](/docs/setup/k8s/getting-started-k8s.md) or [Getting Started with Nuclio on Google Kubernetes Engine (GKE)](/docs/setup/gke/getting-started-gke.md) guide, you invoked functions using their HTTP interface with `nuctl` and the Nuclio dashboard.
+If you followed the [Getting Started with Nuclio on Kubernetes](../../setup/k8s/getting-started-k8s.md) or [Getting Started with Nuclio on Google Kubernetes Engine (GKE)](../../setup/gke/getting-started-gke.md) guide, you invoked functions using their HTTP interface with `nuctl` and the Nuclio dashboard.
 By default, each function deployed to Kubernetes declares a [Kubernetes service](https://kubernetes.io/docs/concepts/services-networking/service/) that is responsible for routing requests to the functions' HTTP trigger port.
 To invoke the function externally, using `nuctl`, you probably exposed your function by using a [NodePort](https://kubernetes.io/docs/concepts/services-networking/service/#type-nodeport), which is a unique cluster-wide port that is assigned to the function.
 
@@ -21,7 +21,7 @@ However, without an ingress controller running on your cluster, this will have n
 
 ## Setting up an ingress controller
 
-In this guide, you'll set up a [Træfik](https://docs.traefik.io/) controller, but any type of Kubernetes ingress controller should work. You can read [Træfik's excellent documentation](https://docs.traefik.io/user-guides/crd-acme/), but for the purposes of this guide you can simply run the following commands to set up the controller by using either of the following alternative methods:
+In this guide, you'll set up a [Træfik](https://docs.traefik.io/) controller, but any type of Kubernetes ingress controller should work. You can read [Træfik's excellent documentation](https://doc.traefik.io/traefik/user-guides/crd-acme/), but for the purposes of this guide you can simply run the following commands to set up the controller by using either of the following alternative methods:
 
 - Using `kubectl` to apply the resource YAML files. Note that this installs v1.7, and that the YAML files were removed from newer versions:
   ```sh
@@ -36,7 +36,7 @@ In this guide, you'll set up a [Træfik](https://docs.traefik.io/) controller, b
 
 Verify that the controller is up by running the `kubectl --namespace=kube-system get pods` command, and then run the `kubectl describe service --namespace=kube-system traefik-ingress-service` command to get the ingress NodePort. Following is a sample output for NodePort 30019:
 
-```sh
+```text
 ...
 Port:                     web  80/TCP
 TargetPort:               80/TCP
@@ -67,13 +67,13 @@ curl $(minikube ip):30019/helloworld/latest
 
 ## Customizing function ingress
 
-By default, functions initialize the HTTP trigger and register `<function name>/latest`. However, you might want to add paths for functions to organize them in namespaces/groups, or even choose through which domain your functions can be triggered. To do this, you can configure your HTTP trigger in the [function's configuration](/docs/reference/function-configuration/function-configuration-reference.md). For example:
+By default, functions initialize the HTTP trigger and register `<function name>/latest`. However, you might want to add paths for functions to organize them in namespaces/groups, or even choose through which domain your functions can be triggered. To do this, you can configure your HTTP trigger in the [function's configuration](../../reference/function-configuration/function-configuration-reference.md). For example:
 
 ```yaml
   ...
   triggers:
     http:
-      maxWorkers: 4
+      numWorkers: 4
       kind: "http"
       attributes:
         ingresses:
@@ -102,7 +102,7 @@ Note that since the `i1` configuration explicitly specifies `some.host.com` as t
 
 ## Deploying an ingress example
 
-Let's put this into practice and deploy the [ingress example](/hack/examples/golang/ingress/ingress.go). This is the **function.yaml** file for the example:
+Let's put this into practice and deploy the [ingress example](https://github.com/nuclio/nuclio/tree/development/hack/examples/golang/ingress/ingress.go). This is the **function.yaml** file for the example:
 
 ```yaml
 apiVersion: "nuclio.io/v1"
@@ -111,7 +111,7 @@ spec:
   runtime: "golang"
   triggers:
     http:
-      maxWorkers: 8
+      numWorkers: 8
       kind: http
       attributes:
         ingresses:
@@ -154,7 +154,7 @@ Invoke the function with `nuctl`, which will use the configured NodePort:
 nuctl invoke ingress
 ```
 Following is a sample output for this command:
-```sh
+```text
 > Response headers:
 Server = nuclio
 Date = Thu, 02 Nov 2017 02:11:32 GMT

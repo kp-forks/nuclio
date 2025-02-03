@@ -8,6 +8,8 @@ This guide will guide you through the process of setting up Nuclio services (das
 
 - [Running Nuclio services](#running-nuclio)
 
+- [Running a function locally](#running-function)
+
 <a id="prerequisites"></a>
 ## Prerequisites
 
@@ -16,9 +18,9 @@ Ensure that your setup includes the following prerequisite components:
 - Linux or OSX
 - Git
 - Docker version 19.03+
-- The Go toolchain (CI tests with 1.19, best use that)
-- Kubernetes version 1.20+ (mostly for testing) - `minikube` recommended; (you can follow
-  the [Minikube getting-started guide](/docs/setup/minikube/getting-started-minikube.md))
+- The Go toolchain (CI tests with 1.23, best use that)
+- Kubernetes version 1.24+ (mostly for testing) - `minikube` recommended; (you can follow
+  the [Minikube getting-started guide](../setup/minikube/getting-started-minikube.md))
 - Node version 10.x
 - Goland IDE
 
@@ -57,38 +59,68 @@ docker run --rm -d -p 5000:5000 registry:2
 ```
 
 4. Run Dashboard:
-   1. In Goland - open the `dashboard-kube` run configuration. Make sure the program arguments are as follows:
-   ```sh
-   --platform kube --platform-config hack/env/platform_config.yaml --namespace default --registry localhost:5000 --run-registry localhost:5000 --templates-archive-address "" --templates-git-repository "https://github.com/nuclio/nuclio-templates.git"
---templates-git-ref "refs/heads/master"
-   ```
-   
-   2. If you want to run a specific Nuclio version, you can add the following flags to `Go tool aruments` in the run configuration:
-   ```sh
-   -ldflags="-X github.com/v3io/version-go.label=<Nuclio-version>"
-   ```
-   
-   3. Run it - see that it's listening on port `8070`
+   - In Goland - open the `dashboard-kube` run configuration. Make sure the program arguments are as follows:
+     ```sh
+     --platform kube --platform-config hack/env/platform_config.yaml --namespace default --registry localhost:5000 --run-registry localhost:5000 --templates-archive-address "" --templates-git-repository "https://github.com/nuclio/nuclio-templates.git"
+     ```
+
+      > **Note:** By default, when building a function image, the dashboard will try to pull the base image from the remote registry with the "latest" tag. 
+      If you have the base image locally you can specify the env-var: `NUCLIO_DASHBOARD_NO_PULL_BASE_IMAGES=true`
+
+   - If you want to run a specific Nuclio version, you can add the following flags to `Go tool aruments` in the run configuration:
+      ```sh
+      -ldflags="-X github.com/v3io/version-go.label=<Nuclio-version>"
+      ```
+      Or set the following env-var: `NUCLIO_LABEL=<Nuclio-version>`
+
+   - Run it - see that it's listening on port `8070`
    
 
 5. Run Controller:
-   1. In Goland - open the  `contorller-kube` run configuration. Make sure the program arguments are as follows, with your own kube/config directory:
+   - In Goland - open the  `contorller-kube` run configuration. Make sure the program arguments are as follows, with your own kube/config directory:
    ```sh
    --platform-config hack/env/platform_config.yaml --namespace default --kubeconfig-path path/to/.kube/config
    ```
-   2. Run it.
-   
+   - Run it.
+
 
 6. Run UI:
-   1. Open `pkg/dashboard/ui` in a terminal
-   2. Run:
-   ```sh
-   npm install
-   gulp watch --dev
-   ```
-   And make sure it's listening on port `8000`
-   
-   3. Open `localhost:8000` in a browser and use Nuclio as you please! 
+   - Open `pkg/dashboard/ui` in a terminal
+   - Run:
+      ```sh
+      npm install
+      gulp watch --dev
+      ```
+      And make sure it's listening on port `8000`
+      
+   - Open `localhost:8000` in a browser and use Nuclio as you please! 
    
 
 You can now perform operations on the Nuclio UI and view the dashboard and controller logs live on Goland's run console.
+
+<a id="running-function"></a>
+## Running a function locally
+
+We can also run a function locally, and debug the processor code using Goland.
+
+1. Create a function yaml file,  (This is essentially a function config, since the processor runs inside a single function.
+   e.g for a Go function: hack/env/golang.yaml file:
+   ```yaml
+   meta:
+      name: "my-func"
+      namespace: "nuclio"
+   spec:
+      runtime: golang
+      handler: nuclio:builtin
+      readinessTimeoutSeconds: 60
+      logger:
+         level: debug
+      replicas: 1
+   ```
+   
+2. Open `cmd/processor/main.go` and run the `main` function with the following run configurations:]
+   ```shell
+   --config hack/env/golang.yaml --platform-config hack/env/platform_config.yaml
+   ```
+   
+3. Run it / debug it. You can now debug the processor code, and see the function logs on the console.

@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/nuclio/nuclio/pkg/auth"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/common/testutils"
 
 	"github.com/nuclio/logger"
@@ -35,12 +36,20 @@ import (
 type AuthTestSuite struct {
 	suite.Suite
 	logger logger.Logger
+
+	httpRetryCounter int
 }
 
 func (suite *AuthTestSuite) SetupSuite() {
 	var err error
 	suite.logger, err = nucliozap.NewNuclioZapTest("iguazio-auth")
 	suite.Require().NoError(err)
+}
+
+func (suite *AuthTestSuite) TearDownTest() {
+	if suite.httpRetryCounter > 0 {
+		suite.FailNow("http client missed retrying an HTTP request")
+	}
 }
 
 func (suite *AuthTestSuite) TestAuthenticateIguazioCaching() {
@@ -56,10 +65,10 @@ func (suite *AuthTestSuite) TestAuthenticateIguazioCaching() {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header: map[string][]string{
-				"X-Remote-User":      {"admin"},
-				"X-User-Group-Ids":   {"1,2", "3"},
-				"X-User-Id":          {"some-user-id"},
-				"X-V3io-Session-Key": {"some-password"},
+				headers.RemoteUser:     {"admin"},
+				headers.UserGroupIds:   {"1,2", "3"},
+				headers.UserID:         {"some-user-id"},
+				headers.V3IOSessionKey: {"some-password"},
 			},
 			Body: io.NopCloser(bytes.NewBufferString(`
 {
@@ -139,6 +148,7 @@ func (suite *AuthTestSuite) TestAuthenticate() {
 		incomingRequest     *http.Request
 		invalidRequest      bool
 		includeResponseBody bool
+		retryCounter        int
 	}{
 		{
 			name: "sanity",
@@ -155,6 +165,24 @@ func (suite *AuthTestSuite) TestAuthenticate() {
 				},
 			},
 			includeResponseBody: true,
+		},
+		{
+			name: "sanityRetry",
+			auth: NewAuth(suite.logger, func() *auth.Config {
+				authConfig := auth.NewConfig(auth.KindIguazio)
+				authConfig.Iguazio.VerificationURL = "http://somewhere.local"
+				authConfig.Iguazio.VerificationMethod = http.MethodGet
+				return authConfig
+			}()),
+			authOptions: auth.Options{},
+			incomingRequest: &http.Request{
+				Header: map[string][]string{
+					"Authorization": {"Basic YWJjOmVmZwo="},
+					"Cookie":        {"session=some-session"},
+				},
+			},
+			includeResponseBody: true,
+			retryCounter:        1,
 		},
 		{
 			name: "backwardsCompatibilitySanity",
@@ -224,6 +252,7 @@ func (suite *AuthTestSuite) TestAuthenticate() {
 		},
 	} {
 		suite.Run(testCase.name, func() {
+			suite.httpRetryCounter = testCase.retryCounter
 			testCase.auth.(*Auth).httpClient = testutils.CreateDummyHTTPClient(suite.resolveMockHttpClientHandler(testCase.includeResponseBody))
 			authInfo, err := testCase.auth.Authenticate(testCase.incomingRequest, &testCase.authOptions)
 			if testCase.invalidRequest {
@@ -239,15 +268,15 @@ func (suite *AuthTestSuite) TestAuthenticate() {
 	}
 }
 
-func (suite *AuthTestSuite) resolveMockHttpClientHandler(includeResponseBody bool) func(r *http.Request) *http.Response {
-
+func (suite *AuthTestSuite) resolveMockHttpClientHandler(
+	includeResponseBody bool) func(r *http.Request) *http.Response {
 	response := &http.Response{
 		StatusCode: http.StatusOK,
 		Header: map[string][]string{
-			"X-Remote-User":      {"admin"},
-			"X-User-Group-Ids":   {"1", "2"},
-			"X-User-Id":          {"3"},
-			"X-V3io-Session-Key": {"4"},
+			headers.RemoteUser:     {"admin"},
+			headers.UserGroupIds:   {"1", "2"},
+			headers.UserID:         {"3"},
+			headers.V3IOSessionKey: {"4"},
 		},
 	}
 
@@ -281,7 +310,11 @@ func (suite *AuthTestSuite) resolveMockHttpClientHandler(includeResponseBody boo
 	return func(r *http.Request) *http.Response {
 		authorization := r.Header.Get("Authorization")
 		cookie := r.Header.Get("Cookie")
-		if authorization != "Basic YWJjOmVmZwo=" || cookie != "session=some-session" {
+		if suite.httpRetryCounter > 0 {
+			suite.httpRetryCounter -= 1
+			r.Close = true
+			return nil
+		} else if authorization != "Basic YWJjOmVmZwo=" || cookie != "session=some-session" {
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 			}
@@ -289,6 +322,7 @@ func (suite *AuthTestSuite) resolveMockHttpClientHandler(includeResponseBody boo
 		return response
 	}
 }
+
 func TestAuthTestSuite(t *testing.T) {
 	suite.Run(t, new(AuthTestSuite))
 }

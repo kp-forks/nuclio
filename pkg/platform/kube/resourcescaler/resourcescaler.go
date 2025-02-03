@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +18,12 @@ package resourcescaler
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform/kube"
 	nuclioio "github.com/nuclio/nuclio/pkg/platform/kube/apis/nuclio.io/v1beta1"
@@ -63,10 +63,7 @@ func New(logger logger.Logger,
 		nuclioClientSet:       nuclioClientSet,
 		platformConfiguration: platformConfiguration,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
+			Timeout: 45 * time.Second,
 		},
 	}, nil
 }
@@ -174,7 +171,7 @@ func (n *NuclioResourceScaler) GetConfig() (*scalertypes.ResourceScalerConfig, e
 		DLXOptions: scalertypes.DLXOptions{
 			Namespace:                n.namespace,
 			TargetPort:               8080,
-			TargetNameHeader:         "X-Nuclio-Target",
+			TargetNameHeader:         headers.TargetName,
 			TargetPathHeader:         "X-Nuclio-Function-Path",
 			ListenAddress:            ":8080",
 			ResourceReadinessTimeout: scalertypes.Duration{Duration: resourceReadinessTimeout},

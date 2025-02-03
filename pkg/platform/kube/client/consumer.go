@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"k8s.io/client-go/kubernetes"
+
 	// enable OIDC plugin
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )

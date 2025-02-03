@@ -1,4 +1,4 @@
-# Getting Started with Nuclio on Azure Container Service (AKS)
+# Setting up your AKS cluster and installing Nuclio
 
 Microsoft's [Azure Container Service (AKS)](https://azure.microsoft.com/services/container-service/) manages your hosted Kubernetes environment, making it quick and easy to deploy and manage containerized applications without container orchestration expertise. 
 It also eliminates the burden of ongoing operations and maintenance by provisioning, upgrading, and scaling resources on demand, without taking your applications offline. 
@@ -13,19 +13,19 @@ Follow this step-by-step guide to set up a Nuclio development environment that u
 - [Create a container registry using the Azure CLI](#create-a-container-registry-using-the-azure-cli)
 - [Grant Kubernetes and Nuclio access to the ACR](#grant-kubernetes-and-nuclio-access-to-the-acr)
 - [Install Nuclio](#install-nuclio)
-- [What's next](#whats-next)
+- [What's next](#what-s-next)
 
 ## Prerequisites
 
 Before starting the set-up procedure, ensure that the following prerequisites are met:
 
-- You have an Azure account. If you don't have an account, you can [create one for free](https://azure.microsoft.com/free/).
+- You have an Azure account. If you don't have an account, you can [create one for free](https://azure.microsoft.com/en-us/free/).
 - The [Azure CLI](https://docs.microsoft.com/cli/azure/) (`az`) is installed on your installation machine.
     See the [Azure CLI installation guide](https://docs.microsoft.com/cli/azure/install-azure-cli).
 
 ## Set up your AKS cluster
 
-1.  <a id="create-resource-group"></a>**Create a resource group** by running the following `az` command (see the [Azure CLI documentation](https://docs.microsoft.com/cli/azure/group#az_group_create)):
+1.  <a id="create-resource-group"></a>**Create a resource group** by running the following `az` command (see the [Azure CLI documentation](https://learn.microsoft.com/en-us/cli/azure/group?view=azure-cli-latest#az-group-create)):
 
     ```sh
     az group create --name <resource-group-name> --location <location>
@@ -36,7 +36,7 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
     az group create --name my-nuclio-k8s-rg --location westeurope
     ```
 
-2.  <a id="create-k8s-cluster"></a>**Create a Kubernetes cluster** by running the following `az` command (see the [Azure CLI documentation](https://docs.microsoft.com/cli/azure/aks#az_aks_create)):
+2.  <a id="create-k8s-cluster"></a>**Create a Kubernetes cluster** by running the following `az` command (see the [Azure CLI documentation](https://learn.microsoft.com/en-us/cli/azure/aks?view=azure-cli-latest#az-aks-create)):
 
     ```sh
     az aks create --resource-group <resource-group-name> --name <cluster-name> --node-count <number>
@@ -51,14 +51,14 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
 
 3.  <a id="install-kubectl-cli"></a>**Install the kubectl CLI**.
     If the CLI is already installed, you can skip to the [next step](#connect-aks-cluster-to-kubectl).
-    The [`kubectl`](https://kubernetes.io/docs/user-guide/kubectl-overview/) Kubernetes command-line application enables you to connect to the Kubernetes cluster from your client computer.
-    To install `kubectl` locally, run the following `az` command (see the [Azure CLI documentation](https://docs.microsoft.com/cli/azure/aks#az_aks_install_cli)):
+    The [`kubectl`](https://kubernetes.io/docs/reference/kubectl/) Kubernetes command-line application enables you to connect to the Kubernetes cluster from your client computer.
+    To install `kubectl` locally, run the following `az` command (see the [Azure CLI documentation](https://learn.microsoft.com/en-us/cli/azure/aks?view=azure-cli-latest#az-aks-install-cli)):
 
     ```sh
     az aks install-cli
     ```
 
-4.  <a id="connect-aks-cluster-to-kubectl"></a>**Connect to the cluster with kubectl** by running the following `az` command, which configures the `kubectl` CLI to connect to your Kubernetes cluster (see the [Azure CLI documentation](https://docs.microsoft.com/cli/azure/aks#az_aks_get_credentials)):
+4.  <a id="connect-aks-cluster-to-kubectl"></a>**Connect to the cluster with kubectl** by running the following `az` command, which configures the `kubectl` CLI to connect to your Kubernetes cluster (see the [Azure CLI documentation](https://learn.microsoft.com/en-us/cli/azure/aks?view=azure-cli-latest#az-aks-get-credentials)):
 
     ```sh
     az aks get-credentials --resource-group=<resource-group-name> --name=<cluster-name>
@@ -83,12 +83,12 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
 
 ## Create a container registry using the Azure CLI
 
-[Azure Container Registry (ACR)](https://azure.microsoft.com/services/container-registry/) is a managed Docker container registry service that's used for storing private container container images.
+[Azure Container Registry (ACR)](https://azure.microsoft.com/services/container-registry/) is a managed Docker container registry service that's used for storing private container images.
 For more information, see the [ACR documentation](https://docs.microsoft.com/azure/container-registry/).
 Microsoft's [Create a container registry using the Azure CLI](https://docs.microsoft.com/azure/container-registry/container-registry-get-started-azure-cli) guide explains how to use the `az` CLI to create a container registry.
 
 The Nuclio dashboard builds and pushes functions to a Docker registry. For the Nuclio ACR setup, ACR serves as the Docker registry. 
-Create an ACR instance by using the `az acr create` command (see the [Azure CLI documentation](https://docs.microsoft.com/cli/azure/acr#az_acr_create)):
+Create an ACR instance by using the `az acr create` command (see the [Azure CLI documentation](https://learn.microsoft.com/en-us/cli/azure/acr?view=azure-cli-latest#az-acr-create)):
 > **Note:** The name of the registry (`<registry-name>`) must be unique.
 ```sh
 az acr create --resource-group <resource-group-name> --name <registry-name> --sku Basic
@@ -136,7 +136,7 @@ Each container registry includes an admin user account, which is disabled by def
 
 At this stage you should have a functioning Kubernetes cluster, a Docker registry, and a working Kubernetes CLI (`kubectl`), and you can proceed to install the Nuclio services on the cluster (i.e., deploy Nuclio).
 
-Follow the instructions of [How to run nuclio in Production](/docs/setup/k8s/running-in-production-k8s.md#the-preferred-deployment-method).
+Follow the instructions of [How to run nuclio in Production](../k8s/running-in-production-k8s.md).
 
 > NOTE:
 > Replace the `--docker-server <URL>` with `--docker-server <registry-name>.azurecr.io`
@@ -153,8 +153,8 @@ kubectl port-forward -n nuclio $(kubectl get pods -n nuclio -l nuclio.io/app=das
 
 See the following resources to make the best of your new Nuclio environment:
 
-- [Deploying Functions](/docs/tasks/deploying-functions.md)
-- [Invoking Functions by Name with a Kubernetes Ingress](/docs/concepts/k8s/function-ingress.md)
-- [More function examples](/hack/examples/README.md)
-- [References](/docs/reference)
-- [Best Practices and Common Pitfalls](/docs/concepts/best-practices-and-common-pitfalls.md)
+- [Deploying Functions](../../tasks/deploying-functions.md)
+- [Invoking Functions by Name with a Kubernetes Ingress](../../concepts/k8s/function-ingress.md)
+- [More function examples](../../examples/README.md)
+- [References](../../reference/index)
+- [Best Practices and Common Pitfalls](../../concepts/best-practices-and-common-pitfalls.md)

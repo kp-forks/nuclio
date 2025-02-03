@@ -1,7 +1,7 @@
 //go:build test_integration && test_iguazio
 
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -295,7 +295,8 @@ func (suite *testSuite) TestReceiveRecords() {
 			},
 		},
 		nil,
-		suite.writeMessageToStream)
+		suite.writeMessageToStream,
+		nil)
 }
 
 // before running this test - create a function on your system with numOfReplicas and a v3iostream trigger,

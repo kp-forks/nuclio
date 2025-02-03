@@ -6,7 +6,7 @@ which may be retrieved from the dashboard's HTTP API by sending a GET request to
 
 The following functions are included for each supported runtime:
 dotnetcore (2): helloworld, reverser
-golang (5):     eventhub, helloworld, image, rabbitmq, regexscan
+golang (4):     helloworld, image, rabbitmq, regexscan
 nodejs (1):     dates
 python (5):     encrypt, facerecognizer, helloworld, sentiments, tensorflow
 shell (1):      img-convert
@@ -17,188 +17,17 @@ package functiontemplates
 import (
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 )
 
 var GeneratedFunctionTemplates = []*generatedFunctionTemplate{
-	{
-		Name: "eventhub:golang",
-		Configuration: unmarshalConfig(`metadata: {}
-spec:
-  build:
-    commands:
-    - apk --update --no-cache add ca-certificates
-  dataBindings:
-    alarmsEventhub:
-      attributes:
-        eventHubName: alarms
-        namespace: < your value here >
-        sharedAccessKeyName: < your value here >
-        sharedAccessKeyValue: < your value here >
-      class: eventhub
-      kind: ""
-      url: ""
-    enrichedFleetEventhub:
-      attributes:
-        eventHubName: enrichedfleet
-        namespace: < your value here >
-        sharedAccessKeyName: < your value here >
-        sharedAccessKeyValue: < your value here >
-      class: eventhub
-      kind: ""
-      url: ""
-  description: |
-    An Azure Event Hub triggered function with a configuration that connects to an Azure Event Hub. The function reads messages from two partitions, process the messages, invokes another function, and sends the processed payload to another Azure Event Hub.
-  eventTimeout: ""
-  handler: main:SensorHandler
-  maxReplicas: 1
-  minReplicas: 1
-  platform: {}
-  resources: {}
-  runtime: golang
-  triggers:
-    eventhub:
-      attributes:
-        consumerGroup: < your value here >
-        eventHubName: < you value here >
-        namespace: < your value here >
-        partitions:
-        - 0
-        - 1
-        sharedAccessKeyName: < your value here >
-        sharedAccessKeyValue: < your value here >
-      class: ""
-      kind: eventhub
-      name: ""
-`),
-		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
-package main
-
-import (
-	ctx "context"
-	"encoding/json"
-
-	"github.com/Azure/go-amqp"
-	"github.com/nuclio/nuclio-sdk-go"
-)
-
-type metric struct {
-	ID                       string  ` + "`" + `json:"id"` + "`" + `
-	Latitude                 string  ` + "`" + `json:"latitude"` + "`" + `
-	Longitude                string  ` + "`" + `json:"longitude"` + "`" + `
-	TirePressure             float32 ` + "`" + `json:"tirePressure"` + "`" + `
-	FuelEfficiencyPercentage float32 ` + "`" + `json:"fuelEfficiencyPercentage"` + "`" + `
-	Temperature              int     ` + "`" + `json:"temperature"` + "`" + `
-	WeatherCondition         string  ` + "`" + `json:"weatherCondition"` + "`" + `
-}
-
-type alarm struct {
-	ID   string
-	Type string
-}
-
-type weather struct {
-	Temperature      int    ` + "`" + `json:"temperature"` + "`" + `
-	WeatherCondition string ` + "`" + `json:"weatherCondition"` + "`" + `
-}
-
-func SensorHandler(context *nuclio.Context, event nuclio.Event) (interface{}, error) {
-
-	// get alarms eventhub
-	alarmsEventhub := context.DataBinding["alarmsEventhub"].(*amqp.Sender)
-
-	// get enriched fleet eventhub
-	enrichedFleetEventhub := context.DataBinding["enrichedFleetEventhub"].(*amqp.Sender)
-
-	// unmarshal the eventhub metric
-	eventHubMetric := metric{}
-	if err := json.Unmarshal(event.GetBody(), &eventHubMetric); err != nil {
-		return nil, err
-	}
-
-	// send alarm if tire pressure < threshold
-	var MinTirePressureThreshold float32 = 2
-	if eventHubMetric.TirePressure < MinTirePressureThreshold {
-		marshaledAlarm, err := json.Marshal(alarm{ID: eventHubMetric.ID, Type: "LowTirePressue"})
-		if err != nil {
-			return nil, err
-		}
-
-		// send alarm to event hub
-		if err := sendToEventHub(context, marshaledAlarm, alarmsEventhub); err != nil {
-			return nil, err
-		}
-	}
-
-	// prepare to send to spark via eventhub
-	// call weather station for little enrichment
-	temperature, weatherCondtion, err := getWeather(context, eventHubMetric)
-	if err != nil {
-		return nil, err
-	}
-
-	context.Logger.DebugWith("Got weather", "temp", temperature, "weather", weatherCondtion)
-
-	// assign return values
-	eventHubMetric.Temperature = temperature
-	eventHubMetric.WeatherCondition = weatherCondtion
-
-	// send to spark
-	marshaledMetric, err := json.Marshal(eventHubMetric)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := sendToEventHub(context, marshaledMetric, enrichedFleetEventhub); err != nil {
-		return nil, err
-	}
-
-	return nil, nil
-}
-
-func sendToEventHub(context *nuclio.Context, data []byte, hub *amqp.Sender) error {
-
-	// create an amqp message with the body
-	message := amqp.Message{
-		Data: [][]byte{data},
-	}
-
-	// send the metric
-	if err := hub.Send(ctx.Background(), &message); err != nil {
-		context.Logger.WarnWith("Failed to send message to eventhub", "err", err)
-
-		return err
-	}
-
-	return nil
-}
-
-func getWeather(context *nuclio.Context, m metric) (int, string, error) {
-	return 30, "stormy", nil
-}
-`,
-	},
 	{
 		Name: "helloworld:golang",
 		Configuration: unmarshalConfig(`metadata: {}
 spec:
   build: {}
   description: Showcases unstructured logging and a structured response.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: main:Handler
   maxReplicas: 1
@@ -208,7 +37,7 @@ spec:
   runtime: golang
 `),
 		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -230,7 +59,7 @@ import (
 )
 
 func Handler(context *nuclio.Context, event nuclio.Event) (interface{}, error) {
-	context.Logger.Info("This is an unstrucured %s", "log")
+	context.Logger.Info("This is an unstructured %s", "log")
 
 	return nuclio.Response{
 		StatusCode:  200,
@@ -247,6 +76,7 @@ spec:
   build: {}
   description: |
     Demonstrates how to pass a binary-large object (blob) in an HTTP request body and response. Defines an HTTP request that accepts a binary image or URL as input, converts the input to the target format and size, and returns the converted image in the HTTP response.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: main:Handler
   maxReplicas: 1
@@ -256,7 +86,7 @@ spec:
   runtime: golang
 `),
 		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -355,6 +185,7 @@ spec:
   build: {}
   description: |
     A multi-trigger function with a configuration that connects to RabbitMQ to read messages and write them to local ephemeral storage. If triggered with an HTTP GET request, the function returns the messages that it read from RabbitMQ.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: main:Handler
   maxReplicas: 1
@@ -373,7 +204,7 @@ spec:
       url: amqp://user:password@rabbitmq-host:5672
 `),
 		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -468,6 +299,7 @@ spec:
   build: {}
   description: |
     Uses regular expressions to find patterns of social-security numbers (SSN), credit-card numbers, etc., using text input.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: main:Handler
   maxReplicas: 1
@@ -477,7 +309,7 @@ spec:
   runtime: golang
 `),
 		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -552,6 +384,7 @@ spec:
     - npm install --global moment
   description: |
     Uses moment.js (which is installed as part of the build) to add a specified amount of time to "now", and returns this amount as a string.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: handler
   maxReplicas: 1
@@ -561,7 +394,7 @@ spec:
   runtime: nodejs
 `),
 		SourceCode: `/*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -611,6 +444,7 @@ exports.handler = function(context, event) {
 spec:
   build: {}
   description: Showcases unstructured logging and a structured response.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: nuclio:main
   maxReplicas: 1
@@ -619,7 +453,7 @@ spec:
   resources: {}
   runtime: dotnetcore
 `),
-		SourceCode: `//  Copyright 2017 The Nuclio Authors.
+		SourceCode: `//  Copyright 2023 The Nuclio Authors.
 // 
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -658,6 +492,7 @@ public class nuclio
 spec:
   build: {}
   description: Returns the reverse of the body received in the event.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: nuclio:reverser
   maxReplicas: 1
@@ -666,7 +501,7 @@ spec:
   resources: {}
   runtime: dotnetcore
 `),
-		SourceCode: `//  Copyright 2017 The Nuclio Authors.
+		SourceCode: `//  Copyright 2023 The Nuclio Authors.
 // 
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -704,6 +539,7 @@ spec:
     - pip install simple-crypt
   description: |
     Uses a third-party Python package to encrypt the event body, and showcases build commands for installing both OS-level and Python packages.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: encrypt:encrypt
   maxReplicas: 1
@@ -712,7 +548,7 @@ spec:
   resources: {}
   runtime: python
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -764,6 +600,7 @@ spec:
     - pip install cognitive_face tabulate inflection
   description: |
     Uses Microsoft's face API, configured with function environment variables. The function uses third-party Python packages, which are installed by using an inline configuration.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: face:handler
   maxReplicas: 1
@@ -772,7 +609,7 @@ spec:
   resources: {}
   runtime: python
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -904,6 +741,7 @@ def _build_response(context, body, status_code):
 spec:
   build: {}
   description: Showcases unstructured logging and a structured response.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: helloworld:handler
   maxReplicas: 1
@@ -912,7 +750,7 @@ spec:
   resources: {}
   runtime: python
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -944,6 +782,7 @@ spec:
     commands:
     - pip install requests vaderSentiment
   description: Identifies sentiments in the body strings
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: sentiments:handler
   maxReplicas: 1
@@ -952,7 +791,7 @@ spec:
   resources: {}
   runtime: python
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -986,7 +825,7 @@ def handler(context, event):
 		Configuration: unmarshalConfig(`metadata: {}
 spec:
   build:
-    baseImage: python:3.7-buster
+    baseImage: python:3.9-buster
     commands:
     - apt-get update && apt-get install -y wget
     - wget http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
@@ -996,6 +835,7 @@ spec:
     - pip install requests numpy tensorflow
   description: |
     Uses the inception model of the TensorFlow open-source machine-learning library to classify images. The function demonstrates advanced uses of nuclio with a custom base image, third-party Python packages, pre-loading data into function memory (the AI Model), structured logging, and exception handling.
+  disableDefaultHTTPTrigger: false
   eventTimeout: ""
   handler: tensor:classify
   maxReplicas: 1
@@ -1004,7 +844,7 @@ spec:
   resources: {}
   runtime: python
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1390,7 +1230,7 @@ spec:
   resources: {}
   runtime: shell
 `),
-		SourceCode: `# Copyright 2017 The Nuclio Authors.
+		SourceCode: `# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

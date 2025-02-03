@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/dashboard"
 	"github.com/nuclio/nuclio/pkg/opa"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -59,7 +60,7 @@ func (fer *functionEventResource) GetAll(request *http.Request) (map[string]rest
 
 	getFunctionEventOptions := platform.GetFunctionEventsOptions{
 		Meta: platform.FunctionEventMeta{
-			Name:      request.Header.Get("x-nuclio-function-event-name"),
+			Name:      request.Header.Get(headers.FunctionEventName),
 			Namespace: fer.getNamespaceFromRequest(request),
 		},
 		AuthSession: fer.getCtxSession(ctx),
@@ -73,7 +74,7 @@ func (fer *functionEventResource) GetAll(request *http.Request) (map[string]rest
 	functionName := fer.getFunctionNameFromRequest(request)
 	if functionName != "" {
 		getFunctionEventOptions.Meta.Labels = map[string]string{
-			"nuclio.io/function-name": functionName,
+			common.NuclioResourceLabelKeyFunctionName: functionName,
 		}
 	}
 
@@ -208,7 +209,7 @@ func (fer *functionEventResource) getFunctionEvents(request *http.Request, funct
 			Name:      "",
 			Namespace: namespace,
 			Labels: map[string]string{
-				"nuclio.io/function-name": function.GetConfig().Meta.Name,
+				common.NuclioResourceLabelKeyFunctionName: function.GetConfig().Meta.Name,
 			},
 		},
 		AuthSession: fer.getCtxSession(ctx),
@@ -314,11 +315,11 @@ func (fer *functionEventResource) functionEventToAttributes(functionEvent platfo
 }
 
 func (fer *functionEventResource) getNamespaceFromRequest(request *http.Request) string {
-	return fer.getNamespaceOrDefault(request.Header.Get("x-nuclio-function-event-namespace"))
+	return fer.getNamespaceOrDefault(request.Header.Get(headers.FunctionEventNamespace))
 }
 
 func (fer *functionEventResource) getFunctionNameFromRequest(request *http.Request) string {
-	return request.Header.Get("x-nuclio-function-name")
+	return request.Header.Get(headers.FunctionName)
 }
 
 func (fer *functionEventResource) getFunctionEventInfoFromRequest(request *http.Request, nameRequired bool) (*functionEventInfo, error) {

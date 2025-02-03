@@ -7,7 +7,7 @@
 # Nuclio - 用于实时事件和数据处理的 "serverless" 框架
 
 <p align="center">
-访问 <a href="https://nuclio.io">nuclio.io</a> 获取更多产品信息和新闻，以及一个体验友好的 Web 版 Nuclio <a href="https://nuclio.io/docs/latest/">文档</a>.
+访问 <a href="https://nuclio.io">nuclio.io</a> 获取更多产品信息和新闻，以及一个体验友好的 Web 版 Nuclio <a href="https://docs.nuclio.io/en/stable/">文档</a>.
 </p>
 
 翻译：
@@ -26,7 +26,7 @@
 
 Nuclio 是一个高性能的 "serverless" 框架，专注于数据、I/O和计算密集型的工作负载. 它与流行的数据科学工具集成地很好，例如 [Jupyter](https://jupyter.org/) 和 [Kubeflow](https://www.kubeflow.org/); 支持多种类型的数据和流式数据源; 并且支持在CPU和GPU上执行任务。Nuclio 项目于 2017 年启动，并处于持续不断的快速发展中；现如今，许多初创企业已将 Nuclio 应用于生产。
 
-你可以将 Nuclio 以一个独立的 Docker 容器运行或者运行在一个已有的 [Kubernetes](https://kubernetes.io) 集群中; 在 Nuclio 文档中查看具体的部署指南。 也可以通过 [Iguazio 数据科学平台](https://www.iguazio.com/) 中的全权托管应用服务平台（云上或者本地）来使用 Nuclio，它提供[免费的试用](https://go.iguazio.com/start-your-free-trial).
+你可以将 Nuclio 以一个独立的 Docker 容器运行或者运行在一个已有的 [Kubernetes](https://kubernetes.io) 集群中; 在 Nuclio 文档中查看具体的部署指南。 也可以通过 [Iguazio 数据科学平台](https://www.iguazio.com/) 中的全权托管应用服务平台（云上或者本地）来使用 Nuclio.
 
 如果想通过编码的方式创建或者管理 Nuclio 函数（functions）- 例如, 使用 Jupyter Notebook - 请参阅 [Nuclio Jupyter 项目](https://github.com/nuclio/nuclio-jupyter), 它包含一个完整的 Python 包和软件开发工具包（SDK）用于通过 Jupyter Notebook 创建和部署 Nuclio 函数。 Nuclio 作为新开源项目 [MLRun](https://github.com/mlrun/mlrun) library，以及开源项目 [Kubeflow Pipelines](https://www.kubeflow.org/docs/components/pipelines/) 中不可或缺的部分，分别提供数据科学自动化及追踪能力，以及构建和部署弹性可迁移机器学习（ML）工作流的能力。 
 
@@ -55,11 +55,7 @@ All you need to run the dashboard is Docker:
 探索尝试 Nuclio 的最简单方式是通过运行项目提供的图形用户界面（Nuclio [仪表盘](#dashboard)。你可以很轻松的通过 Docker 将它运行起来：
 
 ```sh
-docker run -p 8070:8070 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /tmp:/tmp \
-  --name nuclio-dashboard \
-  quay.io/nuclio/dashboard:stable-amd64
+docker run -p 8070:8070 -v /var/run/docker.sock:/var/run/docker.sock --name nuclio-dashboard quay.io/nuclio/dashboard:stable-amd64
 ```
 
 ![dashboard](/docs/assets/images/dashboard.png)
@@ -81,7 +77,6 @@ curl -X POST \
 - [在 Kubernetes 中使用 Nuclio](/docs/setup/k8s/getting-started-k8s.md)
 - [在 GKE（Google Kubernetes Engine） 中使用 Nuclio](/docs/setup/gke/getting-started-gke.md)
 - [在 AKS（Azure Container Services） 中使用 Nuclio](/docs/setup/aks/getting-started-aks.md)
-- [在 Katacode 中使用免费的 Kubernetes 沙箱环境中，按步骤运行 Nuclio](https://katacoda.com/javajon/courses/kubernetes-serverless/nuclio)
 
 ## 架构设计
 
@@ -144,7 +139,7 @@ def handler(context, event):
                             status_code=201)
 ```
 
-更多的示例请访问 Nuclio 项目中的 **[hack/examples](hack/examples/README.md)** 目录。
+更多的示例请访问 Nuclio 项目中的 **[Examples page](docs/examples/README.md)** 目录。
 
 
 ## 推荐阅读
@@ -170,18 +165,16 @@ def handler(context, event):
   - [命令行工具 `nuctl`](/docs/reference/nuctl/nuctl.md)
   - [函数配置参考文档](/docs/reference/function-configuration/function-configuration-reference.md)
   - [触发器](/docs/reference/triggers)
-  - [运行时 - .NET Core 3.1](/docs/reference/runtimes/dotnetcore/writing-a-dotnetcore-function.md)
-  - [运行时 - Shell](/docs/reference/runtimes/shell/writing-a-shell-function.md)
-- [示例](hack/examples/README.md)
-- 沙箱环境
-  - [在免费的 Kubernetes 集群中安装 Nuclio 并运行函数，以进行各种探索和试验](https://katacoda.com/javajon/courses/kubernetes-serverless/nuclio)
+  - [运行时 - .NET Core 7.0](/docs/reference/runtimes/dotnetcore/writing-a-dotnetcore-function.md)
+  - [运行时 - Shell](/docs/reference/runtimes/shell/shell-reference.md)
+- [示例](docs/examples/README.md)
 - 贡献指南
   - [代码规范](/docs/devel/coding-conventions.md)
-  - [像 Nuclio 做贡献](/docs/devel/contributing.md)
+  - [向 Nuclio 做贡献](/docs/devel/contributing.md)
 - 媒体平台
   - [使用 Nuclio 运行告诉的 Serverless (PPT)](https://www.slideshare.net/iguazio/running-highspeed-serverless-with-nuclio)
   - [CNCF 网络研讨会 – Serverless and AI (视频)](https://www.youtube.com/watch?v=pTCx569Kd4A)
-  - [使用 Servreless 加快 AI 开发 (指南)](https://dzone.com/articles/tutorial-faster-ai-development-with-serverless)
+  - [使用 Serverless 加快 AI 开发 (指南)](https://dzone.com/articles/tutorial-faster-ai-development-with-serverless)
   - [Nuclio 即 Serverless 的未来 (博客)](https://thenewstack.io/whats-next-serverless/)
   - [Nuclio: 新兴的 Serverless 超级英雄 (博客))](https://hackernoon.com/nuclio-the-new-serverless-superhero-3aefe1854e9a)
   - [为实时应用程序而生的 Serverless 框架 (博客)](https://www.rtinsights.com/serverless-framework-for-real-time-apps-emerges/)

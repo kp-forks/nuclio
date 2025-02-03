@@ -1,7 +1,7 @@
 //go:build test_integration && test_kube
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/platform/kube"
 	"github.com/nuclio/nuclio/pkg/platform/kube/monitoring"
-	kubetest "github.com/nuclio/nuclio/pkg/platform/kube/test"
+	kubetest "github.com/nuclio/nuclio/pkg/platform/kube/test/suite"
 
 	"github.com/stretchr/testify/suite"
 	appsv1 "k8s.io/api/apps/v1"
@@ -153,8 +153,24 @@ def handler(context, event):
 			// wait for monitoring
 			time.Sleep(postDeploymentSleepInterval)
 
+			checkInvocationURLs := func(getFunctionOptions *platform.GetFunctionsOptions) {
+				function := suite.GetFunction(getFunctionOptions)
+
+				// function should have external and internal URL enriched
+				suite.Require().Equal(1, len(function.GetStatus().InternalInvocationURLs))
+				suite.Require().Equal(1, len(function.GetStatus().ExternalInvocationURLs))
+
+				suite.Require().Equal("nuclio-function-recover-after-deploy-fail.default.svc.cluster.local:8080",
+					function.GetStatus().InternalInvocationURLs[0])
+				suite.Require().Equal(
+					fmt.Sprintf(":%d", function.GetStatus().HTTPPort),
+					function.GetStatus().ExternalInvocationURLs[0])
+			}
+
 			// function would become unhealthy as its function deployment is missing the mentioned configmap
 			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateUnhealthy)
+
+			checkInvocationURLs(getFunctionOptions)
 
 			// create the missing configmap
 			configMap, err = suite.KubeClientSet.CoreV1().ConfigMaps(suite.Namespace).Create(suite.Ctx, configMap, metav1.CreateOptions{})
@@ -176,6 +192,8 @@ def handler(context, event):
 
 			// function should be recovered by function monitoring
 			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateReady)
+
+			checkInvocationURLs(getFunctionOptions)
 
 			return true
 		})
@@ -205,14 +223,14 @@ func (suite *FunctionMonitoringTestSuite) TestNoRecoveryAfterDeployError() {
 			// wait for monitoring
 			time.Sleep(postDeploymentSleepInterval)
 
-			// ensure function is still in error state (due to deploy error of missing configmap)
-			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateError)
+			// ensure function is still in unhealthy state (due to deploy error of wrong handler name)
+			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateUnhealthy)
 
 			// let function monitoring run for a while
 			time.Sleep(postDeploymentSleepInterval)
 
-			// function should be remained in error state
-			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateError)
+			// function should remain in unhealthy state
+			suite.GetFunctionAndExpectState(getFunctionOptions, functionconfig.FunctionStateUnhealthy)
 			return true
 		})
 	suite.Require().Error(err)
@@ -222,7 +240,7 @@ func (suite *FunctionMonitoringTestSuite) TestRecoverErrorStateFunctionWhenResou
 	functionName := "function-recovery"
 	createFunctionOptions := suite.CompileCreateFunctionOptions(functionName)
 
-	// for some reasons, some time minikube misses resource quota limitation of 0 pods while there's a single replica
+	// for some reason, sometimes minikube misses resource quota limitation of 0 pods while there's a single replica
 	two := 2
 	createFunctionOptions.FunctionConfig.Spec.Replicas = &two
 	getFunctionOptions := &platform.GetFunctionsOptions{
@@ -230,7 +248,7 @@ func (suite *FunctionMonitoringTestSuite) TestRecoverErrorStateFunctionWhenResou
 		Namespace: createFunctionOptions.FunctionConfig.Meta.Namespace,
 	}
 
-	functionMonitoringSleepTimeout := 2*suite.Controller.GetFunctionMonitoringInterval() +
+	functionMonitoringSleepTimeout := 3*suite.Controller.GetFunctionMonitoringInterval() +
 		monitoring.PostDeploymentMonitoringBlockingInterval
 	suite.DeployFunction(createFunctionOptions, func(deployResults *platform.CreateFunctionResult) bool {
 

@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,23 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG NUCLIO_LABEL
-ARG NUCLIO_DOCKER_REPO
-
-FROM $NUCLIO_DOCKER_REPO/nuclio-base:$NUCLIO_LABEL as build-processor
-
-ARG NUCLIO_GO_LINK_FLAGS_INJECT_VERSION
-
-ARG GOOS=linux
-ARG GOARCH=amd64
-
-# build the processor
-RUN GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build \
-    -a \
-    -installsuffix cgo \
-    -ldflags="${NUCLIO_GO_LINK_FLAGS_INJECT_VERSION}" \
-    -o processor cmd/processor/main.go
-
 FROM scratch
 
-COPY --from=build-processor  /nuclio/processor /home/nuclio/bin/processor
+ARG NUCLIO_ARCH=amd64
+
+ADD .bin/processor-$NUCLIO_ARCH /home/nuclio/bin/processor

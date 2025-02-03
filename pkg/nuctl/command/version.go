@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ func newVersionCommandeer(rootCommandeer *RootCommandeer) *versionCommandeer {
 		Aliases: []string{"ver"},
 		Short:   "Display the version number of the nuctl CLI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("Client version:\n%#v", version.Get().String())
+			fmt.Printf("Client version:\n%#v\n", version.Get().String())
 			return nil
 		},
 	}

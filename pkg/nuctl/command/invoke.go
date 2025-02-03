@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	nuctlcommon "github.com/nuclio/nuclio/pkg/nuctl/command/common"
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/platformconfig"
@@ -51,6 +52,7 @@ type invokeCommandeer struct {
 	contentType                     string
 	headers                         string
 	body                            string
+	raiseOnStatus                   bool
 }
 
 func newInvokeCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *invokeCommandeer {
@@ -70,7 +72,7 @@ func newInvokeCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *i
 			}
 
 			// initialize root
-			if err := rootCommandeer.initialize(); err != nil {
+			if err := rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -106,7 +108,7 @@ func newInvokeCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *i
 
 			// verify correctness of logger level
 			switch commandeer.createFunctionInvocationOptions.LogLevelName {
-			case "none", "debug", "info", "warn", "error":
+			case "none", "debug", "info", "warn", "error": // nolint: goconst
 				break
 			default:
 				return errors.New("Invalid logger level name. Must be one of none / debug / info / warn / error")
@@ -170,6 +172,9 @@ func newInvokeCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *i
 	cmd.Flags().StringVarP(&commandeer.createFunctionInvocationOptions.LogLevelName, "log-level", "l", "info", "Log level - \"none\", \"debug\", \"info\", \"warn\", or \"error\"")
 	cmd.Flags().StringVarP(&commandeer.externalIPAddresses, "external-ips", "", os.Getenv("NUCTL_EXTERNAL_IP_ADDRESSES"), "External IP addresses (comma-delimited) with which to invoke the function")
 	cmd.Flags().DurationVarP(&commandeer.timeout, "timeout", "t", platformconfig.DefaultFunctionInvocationTimeoutSeconds*time.Second, "Invocation request timeout")
+	cmd.Flags().BoolVarP(&commandeer.createFunctionInvocationOptions.SkipTLSVerification, "skip-tls", "", false, "Skip TLS verification")
+	cmd.Flags().BoolVarP(&commandeer.raiseOnStatus, "raise-on-status", "", false, "Fail nuctl in case function invocation returns non-200 status code")
+
 	commandeer.cmd = cmd
 
 	return commandeer
@@ -262,6 +267,11 @@ func (i *invokeCommandeer) outputInvokeResult(createFunctionInvocationOptions *p
 		return errors.Wrap(err, "Failed to output body")
 	}
 
+	// if the flag is set - fail in case function invocation returns non-200 status code
+	if !(invokeResult.StatusCode >= http.StatusOK && invokeResult.StatusCode < 300) && i.raiseOnStatus {
+		return errors.New("Function invocation failed")
+	}
+
 	return nil
 }
 
@@ -338,7 +348,7 @@ func (i *invokeCommandeer) outputFunctionLogs(invokeResult *platform.CreateFunct
 	functionLogs := []map[string]interface{}{}
 
 	// wrap the contents in [] so that it appears as a JSON array
-	encodedFunctionLogs := invokeResult.Headers.Get("x-nuclio-logs")
+	encodedFunctionLogs := invokeResult.Headers.Get(headers.Logs)
 
 	// parse the JSON into function logs
 	err := json.Unmarshal([]byte(encodedFunctionLogs), &functionLogs)
@@ -419,7 +429,7 @@ func (i *invokeCommandeer) outputResponseHeaders(invokeResult *platform.CreateFu
 	for headerName, headerValue := range invokeResult.Headers {
 
 		// skip the log headers
-		if strings.EqualFold(headerName, "X-Nuclio-Logs") {
+		if strings.EqualFold(headerName, headers.Logs) {
 			continue
 		}
 

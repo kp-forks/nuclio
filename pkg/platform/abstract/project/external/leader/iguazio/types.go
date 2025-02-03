@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -56,8 +56,9 @@ func (pl *Project) GetConfig() *platform.ProjectConfig {
 			Labels:      labelListToMap(pl.Data.Attributes.Labels),
 		},
 		Spec: platform.ProjectSpec{
-			Description: pl.Data.Attributes.Description,
-			Owner:       pl.Data.Attributes.OwnerUsername,
+			Description:                 pl.Data.Attributes.Description,
+			Owner:                       pl.Data.Attributes.OwnerUsername,
+			DefaultFunctionNodeSelector: labelListToMap(pl.Data.Attributes.DefaultFunctionNodeSelector),
 		},
 		Status: platform.ProjectStatus{
 			AdminStatus:       pl.Data.Attributes.AdminStatus,
@@ -83,16 +84,17 @@ type ProjectData struct {
 }
 
 type ProjectAttributes struct {
-	Name              string        `json:"name,omitempty"`
-	Namespace         string        `json:"namespace,omitempty"`
-	Labels            []Label       `json:"labels,omitempty"`
-	Annotations       []Label       `json:"annotations,omitempty"`
-	Description       string        `json:"description,omitempty"`
-	AdminStatus       string        `json:"admin_status,omitempty"`
-	OperationalStatus string        `json:"operational_status,omitempty"`
-	UpdatedAt         string        `json:"updated_at,omitempty"`
-	NuclioProject     NuclioProject `json:"nuclio_project,omitempty"`
-	OwnerUsername     string        `json:"owner_username,omitempty"`
+	Name                        string        `json:"name,omitempty"`
+	Namespace                   string        `json:"namespace,omitempty"`
+	Labels                      []Label       `json:"labels,omitempty"`
+	Annotations                 []Label       `json:"annotations,omitempty"`
+	Description                 string        `json:"description,omitempty"`
+	AdminStatus                 string        `json:"admin_status,omitempty"`
+	OperationalStatus           string        `json:"operational_status,omitempty"`
+	UpdatedAt                   string        `json:"updated_at,omitempty"`
+	NuclioProject               NuclioProject `json:"nuclio_project,omitempty"`
+	OwnerUsername               string        `json:"owner_username,omitempty"`
+	DefaultFunctionNodeSelector []Label       `json:"default_function_node_selector,omitempty"`
 }
 
 type ProjectRelationships struct {

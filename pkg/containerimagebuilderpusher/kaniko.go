@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -114,8 +114,13 @@ func (k *Kaniko) BuildAndPushContainerImage(ctx context.Context,
 
 	// Cleanup after 30 minutes, allowing to dev to inspect job / pod information before getting deleted
 	defer time.AfterFunc(k.builderConfiguration.JobDeletionTimeout, func() {
-		if err := k.deleteJob(ctx, namespace, job.Name); err != nil {
-			k.logger.WarnWithCtx(ctx, "Failed to delete job", "err", err.Error())
+
+		// Create a detached context to avoid cancellation of the deletion process
+		detachedCtx := context.WithoutCancel(ctx)
+		if err := k.deleteJob(detachedCtx, namespace, job.Name); err != nil {
+			k.logger.WarnWithCtx(ctx,
+				"Failed to delete job",
+				"err", err.Error())
 		}
 	})
 
@@ -124,11 +129,12 @@ func (k *Kaniko) BuildAndPushContainerImage(ctx context.Context,
 		namespace,
 		job.Name,
 		buildOptions.BuildTimeoutSeconds,
-		buildOptions.ReadinessTimeoutSeconds)
+		buildOptions.ReadinessTimeoutSeconds,
+		buildOptions.BuildLogger)
 }
 
 func (k *Kaniko) GetOnbuildStages(onbuildArtifacts []runtime.Artifact) ([]string, error) {
-	onbuildStages := make([]string, len(onbuildArtifacts))
+	onbuildStages := make([]string, 0, len(onbuildArtifacts))
 	stage := 0
 
 	for _, artifact := range onbuildArtifacts {
@@ -182,6 +188,10 @@ func (k *Kaniko) GetBaseImageRegistry(registry string) string {
 	return k.builderConfiguration.DefaultBaseRegistryURL
 }
 
+func (k *Kaniko) GetRegistryKind() string {
+	return k.builderConfiguration.RegistryKind
+}
+
 func (k *Kaniko) GetOnbuildImageRegistry(registry string) string {
 	return k.builderConfiguration.DefaultOnbuildRegistryURL
 }
@@ -219,6 +229,7 @@ func (k *Kaniko) createContainerBuildBundle(ctx context.Context,
 	}
 
 	buildDir := "/tmp/kaniko-builds"
+	// we need 755 permission to allow running nuclio function with non-root SecurityContext
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
 		return "", "", errors.Wrapf(err, "Failed to ensure directory")
 	}
@@ -256,11 +267,17 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 		buildArgs = append(buildArgs, "--cache=true")
 	}
 
-	if k.builderConfiguration.InsecurePushRegistry {
+	if _, ok := buildOptions.BuildFlags["--insecure"]; !ok && k.builderConfiguration.InsecurePushRegistry {
 		buildArgs = append(buildArgs, "--insecure")
 	}
-	if k.builderConfiguration.InsecurePullRegistry {
+
+	if _, ok := buildOptions.BuildFlags["--insecure-pull"]; !ok && k.builderConfiguration.InsecurePullRegistry {
 		buildArgs = append(buildArgs, "--insecure-pull")
+	}
+
+	// Add user's custom flags
+	for flag := range buildOptions.BuildFlags {
+		buildArgs = append(buildArgs, flag)
 	}
 
 	if k.builderConfiguration.CacheRepo != "" {
@@ -280,6 +297,8 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 
 	assetsURL := fmt.Sprintf("http://%s:8070/kaniko/%s", os.Getenv("NUCLIO_DASHBOARD_DEPLOYMENT_NAME"), bundleFilename)
 	getAssetCommand := fmt.Sprintf("while true; do wget -T 5 -c %s -P %s && break; done", assetsURL, tmpFolderVolumeMount.MountPath)
+
+	serviceAccount := k.resolveServiceAccount(buildOptions)
 
 	kanikoJobSpec := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -347,7 +366,7 @@ func (k *Kaniko) compileJobSpec(ctx context.Context,
 					Affinity:           buildOptions.Affinity,
 					PriorityClassName:  buildOptions.PriorityClassName,
 					Tolerations:        buildOptions.Tolerations,
-					ServiceAccountName: buildOptions.ServiceAccountName,
+					ServiceAccountName: serviceAccount,
 				},
 			},
 		},
@@ -493,14 +512,15 @@ func (k *Kaniko) waitForJobCompletion(ctx context.Context,
 	namespace string,
 	jobName string,
 	buildTimeoutSeconds int64,
-	readinessTimoutSeconds int) error {
+	readinessTimoutSeconds int,
+	buildLogger logger.Logger) error {
 	k.logger.DebugWithCtx(ctx,
 		"Waiting for job completion",
 		"buildTimeoutSeconds", buildTimeoutSeconds,
 		"readinessTimeoutSeconds", readinessTimoutSeconds)
 	timeout := time.Now().Add(time.Duration(buildTimeoutSeconds) * time.Second)
 
-	if err := k.resolveFailFast(ctx, namespace, jobName, time.Duration(readinessTimoutSeconds)*time.Second); err != nil {
+	if err := k.resolveFailFast(ctx, buildLogger, namespace, jobName, time.Duration(readinessTimoutSeconds)*time.Second); err != nil {
 		return errors.Wrap(err, "Kaniko job failed to run")
 	}
 
@@ -538,7 +558,7 @@ func (k *Kaniko) waitForJobCompletion(ctx context.Context,
 			if err != nil {
 				return errors.Wrap(err, "Failed to get job pod")
 			}
-			k.logger.WarnWithCtx(ctx,
+			buildLogger.WarnWithCtx(ctx,
 				"Build container image job has failed",
 				"initContainerStatuses", jobPod.Status.InitContainerStatuses,
 				"containerStatuses", jobPod.Status.ContainerStatuses,
@@ -550,7 +570,7 @@ func (k *Kaniko) waitForJobCompletion(ctx context.Context,
 
 			jobLogs, err := k.getPodLogs(ctx, jobPod)
 			if err != nil {
-				k.logger.WarnWithCtx(ctx,
+				buildLogger.WarnWithCtx(ctx,
 					"Failed to get job logs", "err", err.Error())
 				return errors.Wrap(err, "Failed to retrieve kaniko job logs")
 			}
@@ -587,6 +607,7 @@ func (k *Kaniko) waitForJobCompletion(ctx context.Context,
 }
 
 func (k *Kaniko) resolveFailFast(ctx context.Context,
+	buildLogger logger.Logger,
 	namespace,
 	jobName string,
 	readinessTimout time.Duration) error {
@@ -596,29 +617,52 @@ func (k *Kaniko) resolveFailFast(ctx context.Context,
 		readinessTimout = 5 * time.Minute
 	}
 	failFastTimeout := time.After(readinessTimout)
+	var lastError string
 
 	// fail fast if job pod stuck in Pending or Unknown state
 	for {
 		select {
 		case <-failFastTimeout:
-			k.logger.WarnWithCtx(ctx,
+			buildLogger.WarnWithCtx(ctx,
 				"Kaniko job was not completed in time",
 				"jobName", jobName,
 				"failFastTimeoutDuration", readinessTimout.String())
 
-			return fmt.Errorf("Job was not completed in time, job name:\n%s", jobName)
+			if lastError != "" {
+				return fmt.Errorf("Job was not completed in time, job name: %s. Error: %s ", jobName,
+					lastError)
+			} else {
+				return fmt.Errorf("Job was not completed in time, job name: %s", jobName)
+			}
 		default:
 			jobPod, err := k.getJobPod(ctx, jobName, namespace, true)
 			if err != nil {
 				k.logger.WarnWithCtx(ctx,
 					"Failed to get kaniko job pod",
-					"jobName", jobName)
+					"jobName", jobName,
+					"err", err.Error())
 				time.Sleep(5 * time.Second)
 
 				// skip in case job hasn't started yet. it will fail on timeout if getJobPod keeps failing.
 				continue
 			}
 			if jobPod.Status.Phase == v1.PodPending || jobPod.Status.Phase == v1.PodUnknown {
+				if failure, failed := k.getLastPodWarningEvent(ctx, namespace, jobPod.Name); failed {
+					errorMessage := fmt.Sprintf("%s event for Kaniko pod %s. Message: %s",
+						failure.Reason,
+						jobPod.Name,
+						failure.Message)
+
+					// if an error has changed, print it to the logs
+					if errorMessage != lastError {
+						buildLogger.WarnWithCtx(ctx,
+							"Kaniko pod received a warning event",
+							"eventReason", failure.Reason,
+							"eventMessage", failure.Message,
+							"podName", jobPod.Name)
+						lastError = errorMessage
+					}
+				}
 				time.Sleep(5 * time.Second)
 				continue
 			}
@@ -662,6 +706,39 @@ func (k *Kaniko) getPodLogs(ctx context.Context, jobPod *v1.Pod) (string, error)
 	formattedLogContents := k.prettifyLogContents(string(logContents))
 
 	return formattedLogContents, nil
+}
+
+// getLastPodWarningEvent returns the last k8s warning event for a given pod
+// if event found, then returns (event, true)
+// else returns nil, false
+func (k *Kaniko) getLastPodWarningEvent(ctx context.Context, namespace, podName string) (*v1.Event, bool) {
+	events := k.getPodEvents(ctx, namespace, podName)
+	if events == nil {
+		return nil, false
+	}
+	// Iterate over the events and look for warnings
+	for i := len(events.Items) - 1; i >= 0; i-- {
+		if events.Items[i].Type == v1.EventTypeWarning {
+			return &events.Items[i], true
+		}
+	}
+	return nil, false
+}
+
+func (k *Kaniko) getPodEvents(ctx context.Context, namespace, podName string) *v1.EventList {
+
+	events, err := k.kubeClientSet.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", podName),
+	})
+
+	if err != nil {
+		k.logger.WarnWithCtx(ctx,
+			"Failed to list events for Kaniko pod",
+			"podName", podName,
+			"err", err.Error())
+		return nil
+	}
+	return events
 }
 
 func (k *Kaniko) getJobPod(ctx context.Context, jobName, namespace string, quiet bool) (*v1.Pod, error) {
@@ -715,6 +792,12 @@ func (k *Kaniko) deleteJob(ctx context.Context, namespace string, jobName string
 	if err := k.kubeClientSet.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
 		PropagationPolicy: &propagationPolicy,
 	}); err != nil {
+		k.logger.WarnWithCtx(ctx,
+			"Failed to delete kaniko job",
+			"namespace", namespace,
+			"job", jobName,
+			"error", err.Error(),
+		)
 		return errors.Wrap(err, "Failed to delete job")
 	}
 	k.logger.DebugWithCtx(ctx, "Successfully deleted job", "namespace", namespace, "job", jobName)
@@ -727,4 +810,18 @@ func (k *Kaniko) matchECRUrl(registryURL string) bool {
 
 func (k *Kaniko) resolveAWSRegionFromECR(registryURL string) string {
 	return strings.Split(registryURL, ".")[3]
+}
+
+func (k *Kaniko) resolveServiceAccount(buildOptions *BuildOptions) string {
+
+	// if a builder service account is provided in build options, use it.
+	if buildOptions.BuilderServiceAccount != "" {
+		return buildOptions.BuilderServiceAccount
+	}
+	// otherwise, if default service account is provided in builder configuration, use it.
+	if k.builderConfiguration.DefaultServiceAccount != "" {
+		return k.builderConfiguration.DefaultServiceAccount
+	}
+	// otherwise, use function service account.
+	return buildOptions.FunctionServiceAccount
 }
