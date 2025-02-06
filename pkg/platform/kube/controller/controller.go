@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -69,6 +69,7 @@ func NewController(parentLogger logger.Logger,
 	apigatewayresClient apigatewayres.Client,
 	resyncInterval time.Duration,
 	functionMonitoringInterval time.Duration,
+	scalingGracePeriod time.Duration,
 	cronJobStaleResourcesCleanupInterval time.Duration,
 	evictedPodsCleanupInterval time.Duration,
 	platformConfiguration *platformconfig.Config,
@@ -156,7 +157,9 @@ func NewController(parentLogger logger.Logger,
 		namespace,
 		kubeClientSet,
 		nuclioClientSet,
-		functionMonitoringInterval)
+		functionMonitoringInterval,
+		scalingGracePeriod,
+		platformConfiguration.GetDefaultFunctionReadinessTimeout())
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create function monitor")
 	}
@@ -169,7 +172,7 @@ func NewController(parentLogger logger.Logger,
 			&cronJobStaleResourcesCleanupInterval)
 	}
 
-	// creat evicted pods cleanup monitoring
+	// create evicted pods cleanup monitoring
 	newController.evictedPodsMonitoring = NewEvictedPodsMonitoring(ctx,
 		parentLogger,
 		newController,

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -95,6 +95,10 @@ func (d *Docker) GetDefaultRegistryCredentialsSecretName() string {
 	return d.builderConfiguration.DefaultRegistryCredentialsSecretName
 }
 
+func (d *Docker) GetRegistryKind() string {
+	return d.builderConfiguration.RegistryKind
+}
+
 func (d *Docker) TransformOnbuildArtifactPaths(onbuildArtifacts []runtime.Artifact) (map[string]string, error) {
 
 	// maps between a _relative_ path in staging to the path in the image
@@ -128,6 +132,7 @@ func (d *Docker) buildContainerImage(ctx context.Context, buildOptions *BuildOpt
 		NoCache:        buildOptions.NoCache,
 		Pull:           buildOptions.Pull,
 		BuildArgs:      buildOptions.BuildArgs,
+		BuildFlags:     buildOptions.BuildFlags,
 	})
 
 }
@@ -175,6 +180,7 @@ func (d *Docker) gatherArtifactsForSingleStageDockerfile(ctx context.Context,
 	artifactsDir := path.Join(buildOptions.ContextDir, artifactDirNameInStaging)
 
 	// create an artifacts directory to which we'll copy all of our stuff
+	// we need 755 permission to allow running nuclio function with non-root SecurityContext
 	if err := os.MkdirAll(artifactsDir, 0755); err != nil {
 		return errors.Wrap(err, "Failed to create artifacts directory")
 	}

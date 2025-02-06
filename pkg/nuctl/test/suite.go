@@ -1,7 +1,7 @@
 //go:build test_integration && (test_kube || test_local)
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,11 +38,11 @@ import (
 	nuctlcommon "github.com/nuclio/nuclio/pkg/nuctl/command/common"
 	"github.com/nuclio/nuclio/pkg/platform"
 
-	"github.com/ghodss/yaml"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
-	"github.com/nuclio/zap"
+	nucliozap "github.com/nuclio/zap"
 	"github.com/stretchr/testify/suite"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -60,6 +60,7 @@ type Suite struct {
 	stdinReader          *strings.Reader
 	defaultWaitDuration  time.Duration
 	defaultWaitInterval  time.Duration
+	tempDir              string
 	namespace            string
 	ctx                  context.Context
 }
@@ -103,7 +104,12 @@ func (suite *Suite) SetupSuite() {
 		suite.Require().NoError(err)
 	}
 
+	suite.tempDir, _ = os.MkdirTemp("", "nuctl-tests")
+
 	suite.ctx = context.Background()
+
+	// create project
+	suite.ExecuteNuctl([]string{"create", "project", platform.DefaultProjectName}, map[string]string{}) // nolint: errcheck
 }
 
 func (suite *Suite) SetupTest() {
@@ -114,10 +120,18 @@ func (suite *Suite) SetupTest() {
 }
 
 func (suite *Suite) TearDownSuite() {
+	suite.logger.Debug("Tearing down suite")
 
 	// restore platform kind
 	err := os.Setenv(nuctlPlatformEnvVarName, suite.origPlatformKind)
 	suite.Require().NoError(err)
+
+	err = os.RemoveAll(suite.tempDir)
+	suite.Require().NoError(err, "Failed to remove temp dir - %s", suite.tempDir)
+	// remove project
+	suite.ExecuteNuctl([]string{"delete", "project", platform.DefaultProjectName}, map[string]string{}) // nolint: errcheck
+
+	suite.logger.Debug("Suite tear down completed")
 }
 
 // ExecuteNuctl populates os.Args and executes nuctl as if it were executed from shell
@@ -136,10 +150,7 @@ func (suite *Suite) ExecuteNuctl(positionalArgs []string,
 		rootCommandeer.GetCmd().SetIn(suite.stdinReader)
 	}
 
-	// since args[0] is the executable name, just shove something there
-	argsStringSlice := []string{
-		"nuctl",
-	}
+	var argsStringSlice []string
 
 	// add positional arguments
 	argsStringSlice = append(argsStringSlice, positionalArgs...)
@@ -147,6 +158,14 @@ func (suite *Suite) ExecuteNuctl(positionalArgs []string,
 	for argName, argValue := range namedArgs {
 		argsStringSlice = append(argsStringSlice, fmt.Sprintf("--%s", argName), argValue)
 	}
+
+	if suite.isNamespaceRequired() && !suite.namespaceInArgs(positionalArgs, namedArgs) {
+		// prepend namespace to args
+		argsStringSlice = common.PrependStringsToStringSlice(argsStringSlice, "--namespace", suite.namespace)
+	}
+
+	// since args[0] is the executable name, just shove the binary there
+	argsStringSlice = common.PrependStringToStringSlice(argsStringSlice, "nuctl")
 
 	// override os.Args (this can't go wrong horribly, can it?)
 	os.Args = argsStringSlice
@@ -374,4 +393,20 @@ func (suite *Suite) ensureRunningOnPlatform(expectedPlatformKind string) {
 			expectedPlatformKind,
 			suite.origPlatformKind)
 	}
+}
+
+func (suite *Suite) namespaceInArgs(positionalArgs []string, namedArgs map[string]string) bool {
+	if common.StringSliceContainsString(positionalArgs, "--namespace") || common.StringSliceContainsString(positionalArgs, "-n") {
+		return true
+	}
+
+	if _, ok := namedArgs["namespace"]; ok {
+		return true
+	}
+
+	return false
+}
+
+func (suite *Suite) isNamespaceRequired() bool {
+	return suite.namespace != "" && common.GetKubeconfigPath("") != ""
 }

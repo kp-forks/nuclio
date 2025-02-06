@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,9 +25,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	authpkg "github.com/nuclio/nuclio/pkg/auth"
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
@@ -36,8 +38,9 @@ import (
 )
 
 const (
-	IguzioUsernameLabel                          string = "iguazio.com/username"
-	IguzioVerificationAndDataEnrichmentURLSuffix string = "_enrich_data"
+	IguazioUsernameLabel                          string = "iguazio.com/username"
+	IguazioDomainLabel                            string = "iguazio.com/domain"
+	IguazioVerificationAndDataEnrichmentURLSuffix string = "_enrich_data"
 )
 
 type Auth struct {
@@ -54,7 +57,7 @@ func NewAuth(logger logger.Logger, config *authpkg.Config) authpkg.Auth {
 		httpClient: &http.Client{
 			Timeout: config.Iguazio.Timeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.Iguazio.SkipTLSVerification},
 			},
 		},
 		cache: cache.NewLRUExpireCache(config.Iguazio.CacheSize),
@@ -86,6 +89,11 @@ func (a *Auth) Authenticate(request *http.Request, options *authpkg.Options) (au
 		url = a.config.Iguazio.VerificationDataEnrichmentURL
 	}
 
+	method := a.config.Iguazio.VerificationMethod
+	if method == "" {
+		method = http.MethodPost
+	}
+
 	cacheKey := sha256.Sum256([]byte(cookie + authorization + url))
 
 	// try resolve from cache
@@ -94,7 +102,7 @@ func (a *Auth) Authenticate(request *http.Request, options *authpkg.Options) (au
 	}
 
 	response, err := a.performHTTPRequest(request.Context(),
-		http.MethodPost,
+		method,
 		url,
 		nil,
 		map[string]string{
@@ -147,15 +155,15 @@ func (a *Auth) Authenticate(request *http.Request, options *authpkg.Options) (au
 			"err", err.Error())
 
 		// for backwards compatibility
-		userID = response.Header.Get("x-user-id")
+		userID = response.Header.Get(headers.UserID)
 		if groupIDs == nil {
-			groupIDs = response.Header.Values("x-user-group-ids")
+			groupIDs = response.Header.Values(headers.UserGroupIds)
 		}
 	}
 
 	authInfo := &authpkg.IguazioSession{
-		Username:   response.Header.Get("x-remote-user"),
-		SessionKey: response.Header.Get("x-v3io-session-key"),
+		Username:   response.Header.Get(headers.RemoteUser),
+		SessionKey: response.Header.Get(headers.V3IOSessionKey),
 		UserID:     userID,
 	}
 
@@ -206,23 +214,56 @@ func (a *Auth) performHTTPRequest(ctx context.Context,
 	headers map[string]string) (*http.Response, error) {
 
 	// create request
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(body))
+	request, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create http request")
 	}
 
 	// attach headers
 	for headerKey, headerValue := range headers {
-		req.Header.Set(headerKey, headerValue)
+		request.Header.Set(headerKey, headerValue)
 	}
 
-	// fire request
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to send HTTP request")
+	var lastResponse *http.Response
+	var lastError error
+	if err := common.RetryUntilSuccessfulOnErrorPatterns(
+		time.Second*60,
+		time.Second*3,
+		[]string{
+
+			// usually when service is not up yet
+			"EOF",
+			"connection reset by peer",
+
+			// tl;dr: we should actively retry on such errors, because Go won't as request might not be idempotent
+			"server closed idle connection",
+		},
+		func(retryCounter int) (string, error) {
+
+			// stop now if context is done
+			if err := ctx.Err(); err != nil {
+				return "", errors.Wrap(err, "Context is done")
+			}
+
+			if retryCounter > 0 {
+				a.logger.WarnWithCtx(ctx,
+					"Retrying authentication HTTP request",
+					"retryCounter", retryCounter,
+					"lastError", lastError)
+			}
+
+			// fire request
+			lastResponse, err = a.httpClient.Do(request)
+			if err != nil {
+				lastError = err
+				return err.Error(), errors.Wrap(err, "Failed to send HTTP request")
+			}
+			return "", nil
+		}); err != nil {
+		return lastResponse, errors.Wrap(err, "Failed to perform HTTP request")
 	}
 
-	return resp, nil
+	return lastResponse, nil
 }
 
 func (a *Auth) resolveUserAndGroupIDsFromResponseBody(responseBody map[string]interface{}) (string, []string, error) {

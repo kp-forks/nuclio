@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -62,7 +62,7 @@ func (suite *timeoutSuite) TestTimeout() {
 	var oldPID int
 	okStatusCode := http.StatusOK
 	timeoutStatusCode := http.StatusRequestTimeout
-	sleepTime := 2 * time.Second
+	sleepTime := 5 * time.Second
 
 	suite.DeployFunctionAndRequests(createFunctionOptions, []*httpsuite.Request{
 		{

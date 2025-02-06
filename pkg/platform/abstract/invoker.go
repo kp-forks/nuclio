@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,12 +19,14 @@ package abstract
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/platform"
 
 	"github.com/nuclio/errors"
@@ -78,6 +80,14 @@ func (i *invoker) invoke(ctx context.Context,
 	client := &http.Client{
 		Timeout: createFunctionInvocationOptions.Timeout,
 	}
+
+	// if tls verification is disabled, skip verification
+	if createFunctionInvocationOptions.SkipTLSVerification {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: createFunctionInvocationOptions.SkipTLSVerification},
+		}
+	}
+
 	var req *http.Request
 	var body io.Reader = http.NoBody
 
@@ -94,11 +104,11 @@ func (i *invoker) invoke(ctx context.Context,
 
 	// set headers
 	req.Header = createFunctionInvocationOptions.Headers
-	req.Header.Set("x-nuclio-target", createFunctionInvocationOptions.FunctionInstance.GetConfig().Meta.Name)
+	req.Header.Set(headers.TargetName, createFunctionInvocationOptions.FunctionInstance.GetConfig().Meta.Name)
 
 	// request logs from a given verbosity unless we're specified no logs should be returned
-	if createFunctionInvocationOptions.LogLevelName != "none" && req.Header.Get("x-nuclio-log-level") == "" {
-		req.Header.Set("x-nuclio-log-level", createFunctionInvocationOptions.LogLevelName)
+	if createFunctionInvocationOptions.LogLevelName != "none" && req.Header.Get(headers.LogLevel) == "" {
+		req.Header.Set(headers.LogLevel, createFunctionInvocationOptions.LogLevelName)
 	}
 
 	i.logger.InfoWithCtx(ctx,

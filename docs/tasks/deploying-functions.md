@@ -39,7 +39,7 @@ The entry point, essentially a function native to the runtime, is called wheneve
 
 > **Note:** Nuclio supports configuring multiple triggers for a single function. For example, the same function can be called both via calling an HTTP endpoint and posting to a Kafka stream. Some functions can behave uniformly, as accessing many properties of the event is identical regardless of triggers (for example, `event.GetBody()`). Others may want to behave differently, using the event's trigger information to determine through which trigger it arrived.
 
-The entry point may return a response which is handled differently based on which trigger configured the function. Some synchronous triggers (like HTTP) expect a response, some (like RabbitMQ) expect an ack or nack and others (like cron) ignore the response altogether.
+The entry point may return a response which is handled differently based on which trigger configured the function. Some synchronous triggers (like HTTP) expect a response, some (like RabbitMQ) expect an ACK or NACK and others (like cron) ignore the response altogether.
 
 To put this in Python code, an entry point is a simple function with two arguments and a return value:
 
@@ -80,7 +80,7 @@ the function that you wrote in the previous step to a `/tmp/nuclio/my_function.p
 verify with `nuctl` that everything is properly configured by getting all functions deployed in the "nuclio" namespace:
 
 ```sh
-nuctl get function --namespace nuclio
+$ nuctl get function --namespace nuclio
 
 No functions found
 ```
@@ -108,14 +108,14 @@ nuctl deploy my-function \
 Once the function deploys, you should see `Function deploy complete` and an HTTP port through which you can invoke it. If there's a problem, invoke the above with `--verbose` and try to understand what went wrong. You can see your function through `nuctl get`:
 
 ```sh
-nuctl get function --namespace nuclio
+$ nuctl get function --namespace nuclio
 
   NAMESPACE |    NAME     | VERSION | STATE | NODE PORT | REPLICAS
   nuclio    | my-function | latest  | ready |     ?     | 1/1
 
 ```
 
-To illustrate that the function is indeed accessible via HTTP, you'll use [httpie](https://httpie.org) to invoke
+To illustrate that the function is indeed accessible via HTTP, you'll use [HTTPie](https://httpie.org) to invoke
 the function at the port specified by the deployment log:
 
 ```sh
@@ -135,7 +135,7 @@ A string response
 You can use `nuctl invoke` to invoke the function by name, and even get function logs in the process:
 
 ```sh
-nuctl invoke my-function --namespace nuclio --via external-ip
+$ nuctl invoke my-function --namespace nuclio --via external-ip
 
     nuctl.platform.invoker (I) Executing function {"method": "GET", "url": "http://192.168.64.8:30521", "body": {}}
     nuctl.platform.invoker (I) Got response {"status": "200 OK"}
@@ -174,7 +174,7 @@ While there are several mechanisms to provide the configuration, there is only o
 After you provide this configuration, you can invoke the function and notes that `MY_ENV_VALUE` is now set to `my value`:
 
 ```sh
-nuctl invoke my-function --namespace nuclio --via external-ip
+$ nuctl invoke my-function --namespace nuclio --via external-ip
 
     nuctl.platform.invoker (I) Executing function {"method": "GET", "url": "http://192.168.64.8:30521", "body": {}}
     nuctl.platform.invoker (I) Got response {"status": "200 OK"}
@@ -194,7 +194,7 @@ A string response
 
 If you were to look at the function logs through `kubectl` (assuming you're deploying to Kubernetes), you'd see the function being invoked periodically, where `Invoked from cron` is logged as well:
 
-```sh
+```text
 ...
     processor.cron (I) Got invoked {"trigger_kind": "cron", "some_env": "my value", "event_body": ""}
     processor.cron (I) Invoked from cron
@@ -338,18 +338,17 @@ other HTTP client), consider where it is running from and the network path. An u
 reachable from your client unless you're running the client from inside a pod in your cluster.
 
 If you wish to expose your function externally, for example, to be able to run `nuctl invoke` from outside the
-Kubernetes network, you can do so in one of 2 ways during deployment, both controlled via the [HTTP trigger spec](/docs/reference/triggers/http.md):
-1. Configure the function with a reachable [HTTP ingress](/docs/reference/triggers/http.md#attributes-ingresses). For
-   this to work you'll need to install an ingress controller on your cluster. See [function ingress document](/docs/concepts/k8s/function-ingress.md)
+Kubernetes network, you can do so in one of 2 ways during deployment, both controlled via the [HTTP trigger spec](../reference/triggers/http):
+1. Configure the function with a reachable [HTTP ingress](../reference/triggers/http.md#attributes). For
+   this to work you'll need to install an ingress controller on your cluster. See [function ingress document](../concepts/k8s/function-ingress.md)
    for more details.
-2. Configure the function to use [serviceType](/docs/reference/triggers/http.md#attributes-serviceType) of type `nodePort`.
+2. Configure the function to use [serviceType](../reference/triggers/http.md#attributes) of type `nodePort`.
 
-If you are deploying the function using [nuctl](/docs/reference/nuctl/nuctl.md) CLI, you can also configure a `nodePort` easily by using the
-`--http-trigger-service-type=nodePort` CLI arg.
+If you are deploying the function using [nuctl](../reference/nuctl/nuctl.md) CLI, you can also configure a `nodePort` easily by using the
+`--http-trigger-service-type=nodePort` CLI argument.
 
 <a id="whats-next"></a>
 ## What's next?
 
-- Check out how to [build functions once and deploy them many times](/docs/tasks/deploying-pre-built-functions.md).
-- Read more about [function configuration](/docs/reference/function-configuration/function-configuration-reference.md).
-
+- Check out how to [build functions once and deploy them many times](../tasks/deploying-pre-built-functions.md).
+- Read more about [function configuration](../reference/function-configuration/function-configuration-reference.md).

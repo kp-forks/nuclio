@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package kube
 import (
 	"fmt"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/platform"
 
 	"github.com/nuclio/nuclio-sdk-go"
@@ -36,6 +37,10 @@ func ValidateAPIGatewaySpec(apiGatewaySpec *platform.APIGatewaySpec) error {
 
 	if apiGatewaySpec.Host == "" {
 		return nuclio.NewErrBadRequest("Host must be provided in spec")
+	}
+
+	if !common.ValidateURLPath(apiGatewaySpec.Path) {
+		return nuclio.NewErrBadRequest(fmt.Sprintf("API Gateway path is invalid - %s", apiGatewaySpec.Path))
 	}
 
 	// TODO: update this when adding more upstream kinds. for now allow only `nucliofunction` upstreams

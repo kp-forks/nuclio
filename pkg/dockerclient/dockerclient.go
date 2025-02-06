@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,10 @@ type Client interface {
 	// CopyObjectsFromImage copies objects (files, directories) from a given image to local storage. it does
 	// this through an intermediate container which is deleted afterwards
 	CopyObjectsFromImage(imageName string, objectsToCopy map[string]string, allowCopyErrors bool) error
+
+	// CopyObjectsToContainer copies objects (files, directories) from a local storage to a container
+	// objectToCopy is a map where keys are local storage path and values are container paths
+	CopyObjectsToContainer(containerName string, objectsToCopy map[string]string) error
 
 	// PushImage pushes a local image to a remote docker repository
 	PushImage(imageName string, registryURL string) error

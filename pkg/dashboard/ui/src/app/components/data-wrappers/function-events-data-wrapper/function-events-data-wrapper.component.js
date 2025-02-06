@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -69,12 +69,13 @@ limitations under the License.
         /**
          * Invoke function event
          * @param {Object} eventData
+         * @param {boolean} skipTlsVerification
          * @param {string} invokeUrl
          * @param {Promise} canceller
          * @returns {Promise}
          */
-        function invokeFunction(eventData, invokeUrl, canceller) {
-            return NuclioEventDataService.invokeFunction(eventData, invokeUrl, canceller);
+        function invokeFunction(eventData, skipTlsVerification, invokeUrl, canceller) {
+            return NuclioEventDataService.invokeFunction(eventData, skipTlsVerification, invokeUrl, canceller);
         }
     }
 }());

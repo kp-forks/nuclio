@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package command
 import (
 	"context"
 
+	nucliocommon "github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/nuctl/command/common"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -85,7 +86,7 @@ func newGetFunctionCommandeer(ctx context.Context, getCommandeer *getCommandeer)
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -110,10 +111,10 @@ func newGetFunctionCommandeer(ctx context.Context, getCommandeer *getCommandeer)
 				functions,
 				commandeer.output,
 				cmd.OutOrStdout(),
-				commandeer.renderFunctionConfigWithStatus)
+				commandeer.renderFunctionConfigWithStatus,
+				&nucliocommon.ExportFunctionOptions{})
 		},
 	}
-
 	cmd.PersistentFlags().StringVarP(&commandeer.getFunctionsOptions.Labels, "labels", "l", "", "Function labels (lbl1=val1[,lbl2=val2,...])")
 	cmd.PersistentFlags().StringVarP(&commandeer.output, "output", "o", common.OutputFormatText, "Output format - \"text\", \"wide\", \"yaml\", or \"json\"")
 	commandeer.cmd = cmd
@@ -122,16 +123,25 @@ func newGetFunctionCommandeer(ctx context.Context, getCommandeer *getCommandeer)
 }
 
 func (g *getFunctionCommandeer) renderFunctionConfigWithStatus(functions []platform.Function,
-	renderer func(interface{}) error) error {
+	renderer func(interface{}) error, exportOptions *nucliocommon.ExportFunctionOptions) error {
+	configsWithStatus := make([]functionconfig.ConfigWithStatus, 0, len(functions))
 	for _, function := range functions {
 		functionConfigWithStatus := functionconfig.ConfigWithStatus{
 			Config: *function.GetConfig(),
 			Status: *function.GetStatus(),
 		}
-		if err := renderer(functionConfigWithStatus); err != nil {
+		configsWithStatus = append(configsWithStatus, functionConfigWithStatus)
+	}
+	if len(configsWithStatus) == 1 {
+		if err := renderer(configsWithStatus[0]); err != nil {
 			return errors.Wrap(err, "Failed to render function config with status")
 		}
+		return nil
 	}
+	if err := renderer(configsWithStatus); err != nil {
+		return errors.Wrap(err, "Failed to render function config with status")
+	}
+
 	return nil
 }
 
@@ -160,7 +170,7 @@ func newGetProjectCommandeer(ctx context.Context, getCommandeer *getCommandeer) 
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -185,7 +195,8 @@ func newGetProjectCommandeer(ctx context.Context, getCommandeer *getCommandeer) 
 				projects,
 				commandeer.output,
 				cmd.OutOrStdout(),
-				commandeer.renderProjectConfig)
+				commandeer.renderProjectConfig,
+				false)
 		},
 	}
 
@@ -197,12 +208,20 @@ func newGetProjectCommandeer(ctx context.Context, getCommandeer *getCommandeer) 
 }
 
 func (g *getProjectCommandeer) renderProjectConfig(ctx context.Context, projects []platform.Project, renderer func(interface{}) error) error {
-	for _, project := range projects {
-		if err := renderer(project.GetConfig()); err != nil {
+	if len(projects) == 1 {
+		if err := renderer(projects[0].GetConfig()); err != nil {
 			return errors.Wrap(err, "Failed to render project config")
 		}
+		return nil
 	}
 
+	projectConfigs := make([]platform.ProjectConfig, 0, len(projects))
+	for _, project := range projects {
+		projectConfigs = append(projectConfigs, *project.GetConfig())
+	}
+	if err := renderer(projectConfigs); err != nil {
+		return errors.Wrap(err, "Failed to render project config")
+	}
 	return nil
 }
 
@@ -231,7 +250,7 @@ func newGetAPIGatewayCommandeer(ctx context.Context, getCommandeer *getCommandee
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -256,6 +275,7 @@ func newGetAPIGatewayCommandeer(ctx context.Context, getCommandeer *getCommandee
 	}
 
 	cmd.PersistentFlags().StringVarP(&commandeer.output, "output", "o", common.OutputFormatText, "Output format - \"text\", \"wide\", \"yaml\", or \"json\"")
+	cmd.PersistentFlags().StringVar(&commandeer.getAPIGatewaysOptions.FunctionName, "function-name", "", "Function name to filter api gateways")
 
 	commandeer.cmd = cmd
 
@@ -263,10 +283,19 @@ func newGetAPIGatewayCommandeer(ctx context.Context, getCommandeer *getCommandee
 }
 
 func (g *getAPIGatewayCommandeer) renderAPIGatewayConfig(apiGateways []platform.APIGateway, renderer func(interface{}) error) error {
-	for _, apiGateway := range apiGateways {
-		if err := renderer(apiGateway.GetConfig()); err != nil {
+	if len(apiGateways) == 1 {
+		if err := renderer(apiGateways[0].GetConfig()); err != nil {
 			return errors.Wrap(err, "Failed to render api gateway config")
 		}
+		return nil
+	}
+
+	apiGatewayConfigs := make([]platform.APIGatewayConfig, 0, len(apiGateways))
+	for _, apiGateway := range apiGateways {
+		apiGatewayConfigs = append(apiGatewayConfigs, *apiGateway.GetConfig())
+	}
+	if err := renderer(apiGatewayConfigs); err != nil {
+		return errors.Wrap(err, "Failed to render api gateway config")
 	}
 
 	return nil
@@ -298,7 +327,7 @@ func newGetFunctionEventCommandeer(ctx context.Context, getCommandeer *getComman
 			}
 
 			// initialize root
-			if err := getCommandeer.rootCommandeer.initialize(); err != nil {
+			if err := getCommandeer.rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -306,7 +335,7 @@ func newGetFunctionEventCommandeer(ctx context.Context, getCommandeer *getComman
 
 			if commandeer.functionName != "" {
 				commandeer.getFunctionEventsOptions.Meta.Labels = map[string]string{
-					"nuclio.io/function-name": commandeer.functionName,
+					nucliocommon.NuclioResourceLabelKeyFunctionName: commandeer.functionName,
 				}
 			}
 
@@ -338,10 +367,19 @@ func newGetFunctionEventCommandeer(ctx context.Context, getCommandeer *getComman
 }
 
 func (g *getFunctionEventCommandeer) renderFunctionEventConfig(functionEvents []platform.FunctionEvent, renderer func(interface{}) error) error {
-	for _, functionEvent := range functionEvents {
-		if err := renderer(functionEvent.GetConfig()); err != nil {
+	if len(functionEvents) == 1 {
+		if err := renderer(functionEvents[0].GetConfig()); err != nil {
 			return errors.Wrap(err, "Failed to render function event config")
 		}
+		return nil
+	}
+
+	functionEventConfigs := make([]platform.FunctionEventConfig, 0, len(functionEvents))
+	for _, functionEvent := range functionEvents {
+		functionEventConfigs = append(functionEventConfigs, *functionEvent.GetConfig())
+	}
+	if err := renderer(functionEventConfigs); err != nil {
+		return errors.Wrap(err, "Failed to render function event config")
 	}
 
 	return nil

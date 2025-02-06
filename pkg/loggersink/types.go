@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ limitations under the License.
 package loggersink
 
 import (
+	"strings"
+
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 
 	"github.com/nuclio/logger"
@@ -32,10 +34,10 @@ type Configuration struct {
 func NewConfiguration(name string, loggerSinkConfiguration *platformconfig.LoggerSinkWithLevel) *Configuration {
 	var level logger.Level
 
-	switch loggerSinkConfiguration.Level {
+	switch strings.ToLower(loggerSinkConfiguration.Level) {
 	case "info":
 		level = logger.LevelInfo
-	case "warn":
+	case "warn", "warning":
 		level = logger.LevelWarn
 	case "error":
 		level = logger.LevelError

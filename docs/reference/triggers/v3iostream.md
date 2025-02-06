@@ -1,6 +1,6 @@
-# v3ioStream: Iguazio Data Science Platform Stream Trigger
+# v3ioStream trigger
 
-**In This Document**
+## In this document
 - [Overview](#overview)
 - [Consuming messages through a consumer group](#consume-messages)
   - [Consumption example](#consumption-example)
@@ -92,7 +92,7 @@ One example are stateful functions that might need to go and consume already bei
 For that, Nuclio offers a way to accept new events without committing them, and explicitly mark offsets on the relevant stream shard, when the processing is done.
 This enables the function to receive and process more events simultaneously.
 
-To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enabled` or `explicitOnly`, where the optional modes are:
+To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enable` or `explicitOnly`, where the optional modes are:
 * `enable` - allows explicit and implicit ack according to the "x-nuclio-stream-no-ack" header
 * `disable`- disables the explicit ack feature and allows only implicit acks (default)
 * `explicitOnly`- allows only explicit acks and disables implicit acks
@@ -106,20 +106,15 @@ response.ensure_no_ack()
 ```
 
 To explicitly commit the offset on an event, save the relevant event information in the `QualifiedOffset` object,
-and pass it to async function `explicit_ack()` method of the context's response object, like so:
+and pass it to `explicit_ack()` - an asynchronous method of the context's response object - like so:
 ```py
 qualified_offset = nuclio.QualifiedOffset.from_event(event)
 await context.platform.explicit_ack(qualified_offset)
 ```
 
-During [rebalance](#rebalancing), the function can still be processing events. We can register a callback to drop or commit events being handled when the rebalancing is about to happen, using the following method:
-```py
-context.platform.on_signal(callback)
-```
-
 **NOTES**:
-* Currently, the explicit ack feature is only available for python runtime and function that have a Kafka trigger.
-* The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/kafka-worker-allocation-mode":"static"`.
+* Currently, the explicit ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
+* The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/v3iostream-worker-allocation-mode":"static"`.
 * The `QualifiedOffset` object can be saved in a persistent storage and used to commit the offset on later invocation of the function.
 * The call to the `explicit_ack()` method must be awaited, meaning the handler must be an async function, or provide an event loop to run that method. e.g.:
 ```py
@@ -140,14 +135,14 @@ def handler(context, event):
 As of Nuclio v1.1.33 / v1.3.20, you can configure the following configuration parameters from the Nuclio dashboard:
 
 - **URL**: A consumer-group URL of the form `http://v3io-webapi:8081/<container name>/<stream path>@<consumer group name>`; for example, ` http://v3io-webapi:8081/bigdata/my-stream@cg0`.
-- **Max Workers**: The maximum number of workers to allocate for handling the messages of incoming stream shards. Whenever a worker is available and a message reads a shard, the processing is handled by the available worker.
+- **Num Workers**: The number of workers to allocate for handling the messages of incoming stream shards. Whenever a worker is available and a message reads a shard, the processing is handled by the available worker.
 - **Worker Availability Timeout**: DEPRECATED (ignored)
 - **Partitions**: DEPRECATED (ignored). As explained in the previous sections, in the current release, the assignment of shards ("partitions") to replicas is handled automatically.
 - **Seek To**: The location (offset) within the message from which to consume records when there's no committed offset in the shard's offset attribute. After an offset is committed for a shard in the consumer group, this offset is always used and the **Seek To** parameter is ignored for this shard.
 - **Read Batch Size**: Read batch size - the number of messages to read in each read request that's submitted to the platform.
 - **Polling Interval (ms)**: The time, in milliseconds, to wait between reading messages from the platform stream.
 - **Username**: DEPRECATED (ignored)
-- **Password**: A platform access key for accessing the data.
+- **Password**: A platform access key for accessing the data. If set as `$generate`, Nuclio will look for the `V3IO_ACCESS_KEY` environment variable and use its value as the access key.
 - **Worker allocator name**: DEPRECATED (ignored)
 
 > **Note:** In future versions of Nuclio, it's planned that the dashboard will better reflect the role of the configuration parameters and add more parameters (such as session timeout and heartbeat interval, which are currently always set to the default values of 10s and 3s, respectively, unless you edit the function-configuration file).
@@ -210,7 +205,7 @@ After the command completes successfully, the stream is ready for consumption by
     Use the following trigger configuration:
 
     - **URL** - `http://v3io-webapi:8081/users/test-stream-0@cg0` (where `/users/test-stream-0` is the stream path and `cg0` is the name of the consumer group to use).
-    - **Max Workers** - `8`.
+    - **Num Workers** - `8`.
       This value signifies the number of workers assigned to handle all the shards.
       You can also set it to a different number.
     - **Seek To** - `Earliest`.

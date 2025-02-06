@@ -1,7 +1,7 @@
 //go:build test_integration && test_kube
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -69,6 +69,7 @@ func (suite *apiGatewayCreateGetAndDeleteTestSuite) TestCreateGetAndDelete() {
 			"create",
 			"apigateway",
 			apiGatewayName,
+			"--mask-sensitive-fields",
 		}, namedArgs)
 
 		suite.Require().NoError(err)
@@ -77,12 +78,14 @@ func (suite *apiGatewayCreateGetAndDeleteTestSuite) TestCreateGetAndDelete() {
 			nil)
 		suite.Require().NoError(err)
 
-		// get all named args values - make sure they're all in the output
+		// get all named args values - make sure they're all in the output except password, because we put password into secret
 		var namedArgsValues []string
-		for _, namedArgValue := range namedArgs {
-			namedArgsValues = append(namedArgsValues, namedArgValue)
+		for key, namedArgValue := range namedArgs {
+			if key != "basic-auth-password" {
+				namedArgsValues = append(namedArgsValues, namedArgValue)
+			}
 		}
-		suite.findPatternsInOutput(namedArgsValues, nil)
+		suite.findPatternsInOutput(namedArgsValues, []string{"basic-password"})
 
 		// delete api gateway
 		err = suite.ExecuteNuctl([]string{"delete", "apigateway", apiGatewayName}, nil) // nolint: errcheck
@@ -92,6 +95,91 @@ func (suite *apiGatewayCreateGetAndDeleteTestSuite) TestCreateGetAndDelete() {
 		err = suite.ExecuteNuctl([]string{"get", "apigateway", apiGatewayName, "-o", nuctlcommon.OutputFormatYAML},
 			nil)
 		suite.Require().EqualError(err, "No api gateways found")
+	}
+}
+
+func (suite *apiGatewayCreateGetAndDeleteTestSuite) TestCreateWithWrongPath() {
+
+	apiGatewayName := "get-test-apigateway-with-wrong-path"
+
+	namedArgs := map[string]string{
+		"path":                "wrong path",
+		"authentication-mode": "basicAuth",
+		"basic-auth-username": "basic-username",
+		"basic-auth-password": "basic-password",
+		"function":            "function-x",
+	}
+
+	err := suite.ExecuteNuctl([]string{
+		"create",
+		"apigateway",
+		apiGatewayName,
+		"--mask-sensitive-fields",
+	}, namedArgs)
+
+	suite.Require().Error(err)
+	suite.Require().ErrorContains(err, "Failed to validate and enrich an API gateway")
+}
+
+func (suite *apiGatewayCreateGetAndDeleteTestSuite) TestList() {
+	numOfAPIGateways := 3
+	var apiGatewayNames []string
+
+	for apiGatewayIdx := 0; apiGatewayIdx < numOfAPIGateways; apiGatewayIdx++ {
+		uniqueSuffix := fmt.Sprintf("-%s-%d", xid.New().String(), apiGatewayIdx)
+
+		apiGatewayName := "get-test-apigateway" + uniqueSuffix
+		functionName := fmt.Sprintf("function-%d", apiGatewayIdx)
+		namedArgs := map[string]string{
+			"host":                fmt.Sprintf("host-%s", uniqueSuffix),
+			"description":         fmt.Sprintf("some-description-%d", apiGatewayIdx),
+			"path":                fmt.Sprintf("some-path-%d", apiGatewayIdx),
+			"authentication-mode": "basicAuth",
+			"basic-auth-username": "basic-username",
+			"basic-auth-password": "basic-password",
+			"function":            functionName,
+			"canary-function":     fmt.Sprintf("canary-function-%d", apiGatewayIdx),
+			"canary-percentage":   "25",
+		}
+
+		err := suite.ExecuteNuctl([]string{
+			"create",
+			"apigateway",
+			apiGatewayName,
+			"--mask-sensitive-fields",
+		}, namedArgs)
+
+		suite.Require().NoError(err)
+
+		err = suite.ExecuteNuctl([]string{"get", "apigateway", apiGatewayName, "-o", nuctlcommon.OutputFormatYAML},
+			nil)
+		suite.Require().NoError(err)
+
+		// list api gateways by function name - make sure that only one api gateway returned,
+		// because we create one api gateway on each function
+		err = suite.ExecuteNuctl([]string{"get", "apigateway", "--function-name", functionName},
+			nil)
+		suite.Require().NoError(err)
+		suite.Require().Contains(suite.outputBuffer.String(), apiGatewayName)
+
+		for _, gateway := range apiGatewayNames {
+			suite.Require().NotContains(suite.outputBuffer.String(), gateway)
+		}
+
+		// delete api gateway
+		defer func() {
+			err = suite.ExecuteNuctl([]string{"delete", "apigateway", apiGatewayName}, nil) // nolint: errcheck
+			suite.Require().NoError(err)
+		}()
+
+		apiGatewayNames = append(apiGatewayNames, apiGatewayName)
+
+		// list all api gateways
+		err = suite.ExecuteNuctl([]string{"get", "apigateway"}, nil)
+		suite.Require().NoError(err)
+		for _, gateway := range apiGatewayNames {
+			suite.Require().Contains(suite.outputBuffer.String(), gateway)
+		}
 	}
 }
 
@@ -170,6 +258,7 @@ func (suite *apiGatewayInvokeTestSuite) testInvoke(authenticationMode ingress.Au
 		"create",
 		"apigateway",
 		apiGatewayName,
+		"--mask-sensitive-fields",
 	}, namedArgs)
 	suite.Require().NoError(err)
 

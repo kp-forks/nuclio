@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +20,11 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
-	"github.com/nuclio/nuclio/pkg/errgroup"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
 	"github.com/nuclio/nuclio/pkg/processor/controlcommunication"
@@ -72,12 +72,12 @@ func newTrigger(parentLogger logger.Logger,
 
 	sarama.Logger = NewSaramaLogger(loggerInstance)
 
-	newTrigger := &kafka{
+	kafkaTrigger := &kafka{
 		configuration:       configuration,
 		stopConsumptionChan: make(chan struct{}, 1),
 	}
 
-	newTrigger.AbstractTrigger, err = trigger.NewAbstractTrigger(loggerInstance,
+	kafkaTrigger.AbstractTrigger, err = trigger.NewAbstractTrigger(loggerInstance,
 		workerAllocator,
 		&configuration.Configuration,
 		"async",
@@ -88,14 +88,13 @@ func newTrigger(parentLogger logger.Logger,
 		return nil, errors.New("Failed to create abstract trigger")
 	}
 
-	newTrigger.AbstractTrigger.Trigger = newTrigger
+	kafkaTrigger.AbstractTrigger.Trigger = kafkaTrigger
 
-	newTrigger.Logger.DebugWith("Creating consumer",
+	kafkaTrigger.Logger.DebugWith("Creating consumer",
 		"brokers", configuration.brokers,
 		"workerAllocationMode", configuration.WorkerAllocationMode,
 		"sessionTimeout", configuration.sessionTimeout,
 		"heartbeatInterval", configuration.heartbeatInterval,
-		"rebalanceTimeout", configuration.rebalanceTimeout,
 		"rebalanceTimeout", configuration.rebalanceTimeout,
 		"retryBackoff", configuration.retryBackoff,
 		"maxWaitTime", configuration.maxWaitTime,
@@ -105,14 +104,15 @@ func newTrigger(parentLogger logger.Logger,
 		"fetchMax", configuration.FetchMax,
 		"channelBufferSize", configuration.ChannelBufferSize,
 		"maxWaitHandlerDuringRebalance", configuration.maxWaitHandlerDuringRebalance,
+		"waitExplicitAckDuringRebalanceTimeout", configuration.waitExplicitAckDuringRebalanceTimeout,
 		"logLevel", configuration.LogLevel)
 
-	newTrigger.kafkaConfig, err = newTrigger.newKafkaConfig()
+	kafkaTrigger.kafkaConfig, err = kafkaTrigger.newKafkaConfig()
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to create configuration")
 	}
 
-	return newTrigger, nil
+	return kafkaTrigger, nil
 }
 
 func (k *kafka) Start(checkpoint functionconfig.Checkpoint) error {
@@ -125,11 +125,30 @@ func (k *kafka) Start(checkpoint functionconfig.Checkpoint) error {
 
 	k.shutdownSignal = make(chan struct{}, 1)
 
+	// sendSignalCounter is a counter to track how many times a processor attempted to send a SIGCONT to the wrapper
+	// If the counter exceeds 3, we panic and restart the function to prevent entering a zombie state
+	sendSignalCounter := 0
+
 	// start consumption in the background
 	go func() {
 		for {
 			k.ctx = context.Background()
 			k.Logger.DebugWith("Starting to consume from broker", "topics", k.configuration.Topics)
+
+			if sendSignalCounter > 3 {
+				panic("Exceeded 3 failed attempts to send SIGCONT to the wrapper")
+			}
+			sendSignalCounter += 1
+
+			// signal workers to continue event processing
+			if err := k.SignalWorkersToContinue(); err != nil {
+				k.Logger.WarnWith("Failed to signal worker to continue event processing",
+					"err", errors.GetErrorStackString(err, 10))
+				continue
+			}
+
+			// reset the counter
+			sendSignalCounter = 0
 
 			// start consuming. this will exit without error if a rebalancing occurs
 			if err := k.consumerGroup.Consume(k.ctx, k.configuration.Topics, k); err != nil {
@@ -192,15 +211,14 @@ func (k *kafka) Cleanup(session sarama.ConsumerGroupSession) error {
 func (k *kafka) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	var submitError error
 
-	// cleared when the consumption should stop
-	consumeMessages := true
-
 	submittedEventInstance := submittedEvent{
 		done: make(chan error),
 	}
 
+	// initialize goroutine communication channels
 	submittedEventChan := make(chan *submittedEvent)
 	explicitAckControlMessageChan := make(chan *controlcommunication.ControlMessage)
+	workerDrainingCompleteChan := make(chan bool)
 
 	// submit the events in a goroutine so that we can unblock immediately
 	go k.eventSubmitter(claim, submittedEventChan)
@@ -214,98 +232,193 @@ func (k *kafka) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.C
 			return errors.Wrap(err, "Failed to subscribe to explicit ack control messages")
 		}
 
-		go k.explicitAckHandler(session, explicitAckControlMessageChan)
+		go k.explicitAckHandler(
+			session,
+			explicitAckControlMessageChan,
+			claim.Partition(),
+			claim.Topic(),
+		)
 	}
 
 	k.Logger.DebugWith("Starting claim consumption",
 		"partition", claim.Partition(),
 		"ackWindowSize", ackWindowSize)
-
-	// the exit condition is that (a) the Messages() channel was closed and (b) we got a signal telling us
-	// to stop consumption
-	for message := range claim.Messages() {
-		if !consumeMessages {
-			k.Logger.DebugWith("Stopping message consumption", "partition", claim.Partition())
-
-			break
-		}
-
-		// allocate a worker for this topic/partition
-		workerInstance, cookie, err := k.partitionWorkerAllocator.AllocateWorker(claim.Topic(),
-			int(claim.Partition()),
-			nil)
-		if err != nil {
-			return errors.Wrap(err, "Failed to allocate worker")
-		}
-
-		submittedEventInstance.event.kafkaMessage = message
-		submittedEventInstance.worker = workerInstance
-
-		// handle in the goroutine so we don't block
-		submittedEventChan <- &submittedEventInstance
-
-		// wait for handling done or indication to stop
+consumptionLoop:
+	for {
 		select {
-		case err := <-submittedEventInstance.done:
+		case message := <-claim.Messages():
 
-			// we successfully submitted the message to the handler. mark it
-			if err == nil {
-				session.MarkOffset(
-					message.Topic,
-					message.Partition,
-					message.Offset+1-ackWindowSize,
-					"",
+			// allocate a worker for this topic/partition
+			workerInstance, cookie, err := k.partitionWorkerAllocator.AllocateWorker(claim.Topic(),
+				int(claim.Partition()),
+				nil)
+			if err != nil {
+				// If all workers are terminated, we don't want to stop consumption to avoid Kafka reconnection
+				// and give some time to the explicitAckHandler to process the last control messages.
+				if errors.Is(err, worker.ErrAllWorkersAreTerminated) {
+					continue
+				}
+				return errors.Wrap(err, "Failed to allocate worker")
+			}
+
+			submittedEventInstance.event.kafkaMessage = message
+			submittedEventInstance.worker = workerInstance
+
+			// handle in the goroutine so we don't block
+			submittedEventChan <- &submittedEventInstance
+
+			select {
+			case err := <-submittedEventInstance.done:
+
+				// we successfully submitted the message to the handler. mark it
+				if err == nil {
+					session.MarkOffset(
+						message.Topic,
+						message.Partition,
+						message.Offset+1-ackWindowSize,
+						"",
+					)
+				}
+				if err := k.partitionWorkerAllocator.ReleaseWorker(cookie, workerInstance); err != nil {
+					return errors.Wrap(err, "Failed to release worker")
+				}
+			case <-session.Context().Done():
+
+				k.Logger.DebugWith("Got signal to stop consumption",
+					"wait", k.configuration.maxWaitHandlerDuringRebalance.String(),
+					"partition", claim.Partition(),
+					"waitForHandler", true,
 				)
+
+				// waitForHandler value is true here because we catch session closure during waiting for event submitting
+				// which means that we start processing msg on this iteration, so during session closure we have to wait for
+				// event to be successfully submitted
+				k.drainOnRebalance(session, claim, workerInstance, &submittedEventInstance, message, true)
+				if err := k.partitionWorkerAllocator.ReleaseWorker(cookie, workerInstance); err != nil {
+					return errors.Wrap(err, "Failed to release worker")
+				}
+				break consumptionLoop
 			}
 
 		case <-session.Context().Done():
 			k.Logger.DebugWith("Got signal to stop consumption",
-				"wait", k.configuration.maxWaitHandlerDuringRebalance,
-				"partition", claim.Partition())
-
-			// don't consume any more messages
-			consumeMessages = false
-
-			// TODO: find a way to signal the workers on an imminent rebalance so they can stop gracefully
-			// since current implementation is not working (IG-21152)
-			// go k.signalWorkerTermination(workerTerminationCompleteChan)
-
-			//  wait a for rebalance readiness or max timeout
-			select {
-			case <-submittedEventInstance.done:
-				k.Logger.DebugWith("Handler done, rebalancing will commence")
-
-			case <-time.After(k.configuration.maxWaitHandlerDuringRebalance):
-				k.Logger.DebugWith("Timed out waiting for handler to complete",
-					"partition", claim.Partition())
-
-				// mark this as a failure, metric-wise
-				k.UpdateStatistics(false)
-
-				// restart the worker, and having failed that shut down
-				if err := k.cancelEventHandling(workerInstance, claim); err != nil {
-					k.Logger.DebugWith("Failed to cancel event handling",
-						"err", err.Error(),
-						"partition", claim.Partition())
-
-					panic("Failed to cancel event handling")
-				}
-			}
-		}
-
-		// release the worker from whence it came
-		if err := k.partitionWorkerAllocator.ReleaseWorker(cookie, workerInstance); err != nil {
-			return errors.Wrap(err, "Failed to release worker")
+				"wait", k.configuration.maxWaitHandlerDuringRebalance.String(),
+				"partition", claim.Partition(),
+				"waitForHandler", false,
+			)
+			// waitForHandler value is false here because we didn't start msg processing on this iteration
+			k.drainOnRebalance(session, claim, nil, nil, nil, false)
+			break consumptionLoop
 		}
 	}
 
 	k.Logger.DebugWith("Claim consumption stopped", "partition", claim.Partition())
 
+	// unsubscribe channel from the streamAck control message kind before closing it
+	if functionconfig.ExplicitAckEnabled(k.configuration.ExplicitAckMode) {
+		if err := k.UnsubscribeFromControlMessageKind(controlcommunication.StreamMessageAckKind, explicitAckControlMessageChan); err != nil {
+			k.Logger.WarnWith("Failed to unsubscribe channel from control message kind", "err", err)
+		}
+	}
+
 	// shut down goroutines and channels
 	close(submittedEventChan)
 	close(explicitAckControlMessageChan)
+	close(workerDrainingCompleteChan)
 
 	return submitError
+}
+
+func (k *kafka) drainOnRebalance(session sarama.ConsumerGroupSession,
+	claim sarama.ConsumerGroupClaim,
+	workerInstance *worker.Worker,
+	submittedEventInstance *submittedEvent,
+	message *sarama.ConsumerMessage,
+	waitForHandler bool) {
+
+	readyForRebalanceChan := make(chan bool)
+	defer close(readyForRebalanceChan)
+
+	go func() {
+		defer common.CatchAndLogPanicWithOptions(k.ctx, // nolint: errcheck
+			k.Logger,
+			"trying to write into channel, which was closed because of wait for rebalance timeout",
+			&common.CatchAndLogPanicOptions{
+				Args:          []interface{}{"partition", claim.Partition()},
+				CustomHandler: nil,
+			})
+		var wg sync.WaitGroup
+		if waitForHandler {
+			wg.Add(2)
+			go func() {
+				err := <-submittedEventInstance.done
+
+				// we successfully submitted the message to the handler. mark it
+				if err == nil {
+					session.MarkOffset(
+						message.Topic,
+						message.Partition,
+						message.Offset+1-int64(k.configuration.ackWindowSize),
+						"",
+					)
+				}
+				k.Logger.DebugWith("Handler done", "partition", claim.Partition())
+				wg.Done()
+			}()
+		} else {
+			wg.Add(1)
+		}
+
+		go func() {
+			// this needs to occur once. the reason is that this specific function (ConsumeClaim)
+			// runs in parallel for each partition, and we want to make sure that we only
+			// drain the workers once.
+			if err := k.SignalWorkersToDrain(); err != nil {
+				k.Logger.DebugWith("Failed to signal worker draining",
+					"err", err.Error(),
+					"partition", claim.Partition())
+			}
+			wg.Done()
+		}()
+
+		wg.Wait()
+		readyForRebalanceChan <- true
+	}()
+
+	// wait a for rebalance readiness or max timeout
+	select {
+	case <-readyForRebalanceChan:
+		if functionconfig.ExplicitAckEnabled(k.configuration.ExplicitAckMode) {
+			// if we are in explicitAck it means that runtime code sends control messages to processor
+			// sometimes draining happens too fast, so we don't have enough time to process ack control message
+			// this wait time is intended to solve this issue and avoid processing one message twice
+			k.Logger.DebugWith("Waiting for control messages from runtime before rebalance",
+				"waitTimeout", k.configuration.waitExplicitAckDuringRebalanceTimeout,
+				"partition", claim.Partition())
+
+			time.Sleep(k.configuration.waitExplicitAckDuringRebalanceTimeout)
+		}
+		k.Logger.DebugWith("Handler done, rebalancing will commence",
+			"partition", claim.Partition())
+
+	case <-time.After(k.configuration.maxWaitHandlerDuringRebalance):
+		k.Logger.WarnWith("Timed out waiting for handler to complete",
+			"partition", claim.Partition())
+
+		// mark this as a failure, metric-wise
+		k.UpdateStatistics(false, 1)
+
+		if waitForHandler {
+			// the rebalance timeout occurred while we waited for the handler, cancel it and restart the worker
+			if err := k.cancelEventHandling(workerInstance, claim); err != nil {
+				k.Logger.DebugWith("Failed to cancel event handling",
+					"err", err.Error(),
+					"partition", claim.Partition())
+
+				panic("Failed to cancel event handling")
+			}
+		}
+	}
 }
 
 func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventChan chan *submittedEvent) {
@@ -327,11 +440,12 @@ func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventCh
 		switch k.configuration.ExplicitAckMode {
 		case functionconfig.ExplicitAckModeEnable:
 
+			// decide whether to ack or not based on the `StreamNoAck` header
 			if err := k.resolveNoAckMessage(response, submittedEvent); err != nil {
 				processErr = err
 			}
 
-			// indicate that we're done
+			// pass the result
 			submittedEvent.done <- processErr
 
 		case functionconfig.ExplicitAckModeDisable:
@@ -339,10 +453,14 @@ func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventCh
 			// indicate that we're done
 			submittedEvent.done <- processErr
 
-		// also includes ExplicitAckModeExplicitOnly
+		case functionconfig.ExplicitAckModeExplicitOnly:
+
+			// we always return an error so the offset will only be marked by the explicit ack handler
+			submittedEvent.done <- processor.StreamNoAckError{}
 		default:
 
-			// ignore response
+			// we should not get here, but just in case
+			submittedEvent.done <- processErr
 		}
 	}
 
@@ -354,6 +472,9 @@ func (k *kafka) eventSubmitter(claim sarama.ConsumerGroupClaim, submittedEventCh
 func (k *kafka) cancelEventHandling(workerInstance *worker.Worker,
 	claim sarama.ConsumerGroupClaim) error {
 	if workerInstance.SupportsRestart() {
+		k.Logger.WarnWith("Cancelling event handling",
+			"topic", claim.Topic(),
+			"partition", claim.Partition())
 		return workerInstance.Restart()
 	}
 
@@ -387,11 +508,27 @@ func (k *kafka) newKafkaConfig() (*sarama.Config, error) {
 	config.Net.TLS.Enable = k.configuration.CACert != "" || k.configuration.TLS.Enable
 	if config.Net.TLS.Enable {
 		k.Logger.DebugWith("Enabling TLS",
+			"minimumVersion", k.configuration.TLS.MinimumVersion,
 			"calen", len(k.configuration.CACert))
-		config.Net.TLS.Config = &tls.Config{
-			InsecureSkipVerify: k.configuration.TLS.InsecureSkipVerify,
+		if k.configuration.TLS.MinimumVersion == "" {
+			k.configuration.TLS.MinimumVersion = "1.2"
 		}
 
+		getTLSMinimumVersion := func(version string) uint16 {
+			switch version {
+			case "1.2":
+				return tls.VersionTLS12
+			case "1.3":
+				return tls.VersionTLS13
+			default:
+				return tls.VersionTLS13
+			}
+		}
+
+		config.Net.TLS.Config = &tls.Config{
+			InsecureSkipVerify: k.configuration.TLS.InsecureSkipVerify,
+			MinVersion:         getTLSMinimumVersion(k.configuration.TLS.MinimumVersion),
+		}
 		if k.configuration.CACert != "" {
 			caCertPool := x509.NewCertPool()
 			caCertPool.AppendCertsFromPEM([]byte(k.configuration.CACert))
@@ -422,7 +559,13 @@ func (k *kafka) newKafkaConfig() (*sarama.Config, error) {
 		config.Net.SASL.User = k.configuration.SASL.User
 		config.Net.SASL.Password = k.configuration.SASL.Password
 		config.Net.SASL.Mechanism = sarama.SASLMechanism(k.configuration.SASL.Mechanism)
-		config.Net.SASL.Handshake = k.configuration.SASL.Handshake
+
+		// Set SASL handshake if explicitly specified in configuration, so we can use sarama's
+		// default handshake (which is true)
+		if k.configuration.SASL.Handshake != nil {
+			config.Net.SASL.Handshake = *k.configuration.SASL.Handshake
+		}
+
 		config.Net.SASL.SCRAMClientGeneratorFunc = k.resolveSCRAMClientGeneratorFunc(config.Net.SASL.Mechanism)
 
 		// per mechanism configuration
@@ -501,54 +644,39 @@ func (k *kafka) resolveSCRAMClientGeneratorFunc(mechanism sarama.SASLMechanism) 
 	}
 }
 
-// signalWorkerTermination sends a SIGTERM signal to all workers, signaling them to drop or ack events
-// that are currently being processed
-func (k *kafka) signalWorkerTermination(workerTerminationCompleteChan chan bool) {
-
-	// signal all workers on re-balance
-	k.Logger.Debug("Signaling all workers to drop or ack events due to rebalance")
-
-	errGroup, _ := errgroup.WithContext(context.Background(), k.Logger)
-
-	for _, workerInstance := range k.WorkerAllocator.GetWorkers() {
-		workerInstance := workerInstance
-		if !workerInstance.IsTerminated() {
-			errGroup.Go(fmt.Sprintf("Terminating worker %d", workerInstance.GetIndex()), func() error {
-				if err := workerInstance.Terminate(); err != nil {
-					return errors.Wrapf(err, "Failed to signal worker %d to terminate", workerInstance.GetIndex())
-				}
-
-				return nil
-			})
-		}
-	}
-
-	if err := errGroup.Wait(); err != nil {
-		k.Logger.WarnWith("At least one worker failed to stop", "err", err.Error())
-	}
-
-	// signal termination complete
-	workerTerminationCompleteChan <- true
-}
-
 // explicitAckHandler reads offset data messages from the trigger's control channel, and marks the
 // offset accordingly
-func (k *kafka) explicitAckHandler(session sarama.ConsumerGroupSession,
-	controlMessageChan chan *controlcommunication.ControlMessage) {
+func (k *kafka) explicitAckHandler(
+	session sarama.ConsumerGroupSession,
+	controlMessageChan chan *controlcommunication.ControlMessage,
+	partitionNumber int32,
+	topic string) {
 
 	k.Logger.InfoWith("Listening for explicit ack control messages")
 
 	for streamAckControlMessage := range controlMessageChan {
-
-		k.Logger.DebugWith("Received explicit ack control message", "controlMessage", streamAckControlMessage)
 
 		// retrieve attributes from control message
 		explicitAckAttributes := &controlcommunication.ControlMessageAttributesExplicitAck{}
 
 		// decode offset data from message attributes
 		if err := mapstructure.Decode(streamAckControlMessage.Attributes, explicitAckAttributes); err != nil {
-			k.Logger.WarnWith("Failed decoding control message attributes", "err", err)
+			k.Logger.WarnWith("Failed decoding control message attributes", "err", err.Error())
 			continue
+		}
+
+		// skip the message if it is not for this topic and partition
+		if !(explicitAckAttributes.Partition == partitionNumber && explicitAckAttributes.Topic == topic) {
+			continue
+		}
+
+		// this log is mostly for development purposes, to see that we are actually marking the offset
+		// to enable it use the "nuclio.io/kafka-log-level" annotation
+		if k.configuration.LogLevel > 5 {
+			k.Logger.InfoWith("Marking offset on explicit ack request",
+				"topic", explicitAckAttributes.Topic,
+				"partition", explicitAckAttributes.Partition,
+				"offset", explicitAckAttributes.Offset)
 		}
 
 		// mark offset
@@ -560,7 +688,8 @@ func (k *kafka) explicitAckHandler(session sarama.ConsumerGroupSession,
 		)
 	}
 
-	k.Logger.InfoWith("Stopped listening for explicit ack control messages")
+	k.Logger.InfoWith("Stopped listening for explicit ack control messages",
+		"partition", partitionNumber)
 }
 
 func (k *kafka) resolveNoAckMessage(response interface{}, submittedEvent *submittedEvent) error {
@@ -575,7 +704,7 @@ func (k *kafka) resolveNoAckMessage(response interface{}, submittedEvent *submit
 	}
 
 	// check response header for no-ack
-	if noAckHeader, exists := responseHeaders["x-nuclio-stream-no-ack"]; exists {
+	if noAckHeader, exists := responseHeaders[headers.StreamNoAck]; exists {
 
 		// convert header to boolean
 		if noAckHeaderBool, ok := noAckHeader.(bool); ok && noAckHeaderBool {

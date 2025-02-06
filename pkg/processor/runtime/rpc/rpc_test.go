@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,8 +23,6 @@ import (
 	"encoding/json"
 	"io"
 	"net"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +31,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
+	"github.com/nuclio/nuclio/pkg/processor/runtime/rpc/result"
 
 	"github.com/nuclio/logger"
 	"github.com/nuclio/zap"
@@ -64,7 +63,7 @@ func (suite *RPCSuite) TestLogBeforeEvent() {
 }
 
 func (suite *RPCSuite) emitLog(message string, conn io.Writer) {
-	log := &rpcLogRecord{
+	log := &result.RpcLogRecord{
 		DateTime: time.Now().String(),
 		Level:    "info",
 		Message:  message,
@@ -78,14 +77,6 @@ func (suite *RPCSuite) emitLog(message string, conn io.Writer) {
 	suite.Require().NoError(err, "Can't encode log record")
 	_, err = io.Copy(conn, &buf)
 	suite.Require().NoError(err)
-}
-
-func (suite *RPCSuite) dummyProcess() *os.Process {
-	var buf bytes.Buffer
-	cmd := exec.Command("ls")
-	cmd.Stdout = &buf
-	suite.Require().NoError(cmd.Run(), "Can't run")
-	return cmd.Process
 }
 
 func (suite *RPCSuite) runtimeConfiguration(loggerInstance logger.Logger) *runtime.Configuration {

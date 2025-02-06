@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,8 @@ limitations under the License.
 package test
 
 import (
-	"path"
 	"testing"
 
-	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/processor/build/runtime/test/suite"
 	"github.com/nuclio/nuclio/pkg/processor/trigger/http/test/suite"
 
@@ -121,22 +119,6 @@ func (suite *TestSuite) TestBuildWithJarFromURL() {
 		RequestBody:          "abcd",
 		ExpectedResponseBody: "dcba",
 	})
-}
-
-func (suite *TestSuite) getDeployOptions(functionName string) *platform.CreateFunctionOptions {
-	functionInfo := suite.RuntimeSuite.GetFunctionInfo(functionName)
-
-	if functionInfo.Skip {
-		suite.T().Skip()
-	}
-
-	createFunctionOptions := suite.GetDeployOptions(functionName,
-		path.Join(functionInfo.Path...))
-
-	createFunctionOptions.FunctionConfig.Spec.Handler = functionInfo.Handler
-	createFunctionOptions.FunctionConfig.Spec.Runtime = functionInfo.Runtime
-
-	return createFunctionOptions
 }
 
 func TestIntegrationSuite(t *testing.T) {

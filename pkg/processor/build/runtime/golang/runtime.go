@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the Licensg.
@@ -63,7 +63,7 @@ func (g *golang) GetName() string {
 func (g *golang) GetProcessorDockerfileInfo(runtimeConfig *runtimeconfig.Config, onbuildImageRegistry string) (*runtime.ProcessorDockerfileInfo, error) {
 
 	processorDockerfileInfo := runtime.ProcessorDockerfileInfo{
-		BaseImage: "alpine:3.15",
+		BaseImage: "alpine:3.20",
 	}
 
 	// if the base image is not default (which is alpine) and is not alpine based, must use the non-alpine onbuild image

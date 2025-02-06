@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -125,7 +125,6 @@ class TestSubmitEvents(unittest.TestCase):
             for i in range(num_of_events)
         )
         self._send_events(events)
-        self._wrapper._is_entrypoint_coroutine = True
         self._wrapper._entrypoint = event_recorder
         self._wrapper._event_sock.setblocking(False)
         self._loop.run_until_complete(self._wrapper.serve_requests(num_of_events))
@@ -291,6 +290,19 @@ class TestSubmitEvents(unittest.TestCase):
         for recorded_event_index, recorded_event in enumerate(sorted(recorded_events, key=operator.attrgetter('id'))):
             self.assertEqual(recorded_event_index, recorded_event.id)
             self.assertEqual('e{}'.format(recorded_event_index), self._ensure_str(recorded_event.body))
+
+    def test_encode_batched_entrypoint_output(self):
+        single_response = nuclio_sdk.Response(
+            body=str(123),
+            headers={},
+            content_type=123,
+            status_code=200,
+        )
+        encoded_single = json.loads(self._wrapper._encode_entrypoint_output(single_response))
+        encoded_batch = json.loads(self._wrapper._encode_entrypoint_output([single_response, single_response]))
+        assert encoded_batch[0] == encoded_single
+        assert encoded_batch[1] == encoded_single
+
 
     # to run memory profiling test, uncomment the tests below
     # and from terminal run with

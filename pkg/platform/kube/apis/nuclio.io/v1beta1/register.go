@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,11 @@ limitations under the License.
 package v1beta1
 
 import (
+	"github.com/nuclio/nuclio/pkg/platform/kube/apis/nuclio.io"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"github.com/nuclio/nuclio/pkg/platform/kube/apis/nuclio.io"
 )
 
 // SchemeGroupVersion is group version used to register these objects

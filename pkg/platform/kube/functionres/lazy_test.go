@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,13 +31,13 @@ import (
 	nuclioiofake "github.com/nuclio/nuclio/pkg/platform/kube/client/clientset/versioned/fake"
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 
+	"dario.cat/mergo"
 	"github.com/google/go-cmp/cmp"
-	"github.com/imdario/mergo"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/zap"
 	"github.com/stretchr/testify/suite"
 	appsv1 "k8s.io/api/apps/v1"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
@@ -176,30 +176,9 @@ func (suite *lazyTestSuite) TestEnrichIngressWithDefaultAnnotations() {
 		},
 	} {
 		suite.Run(testCase.name, func() {
-			one := 1
-			defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
-			defaultHTTPTrigger.Annotations = testCase.functionIngressAnnotations
-			defaultHTTPTrigger.Attributes = map[string]interface{}{
-				"ingresses": map[string]interface{}{
-					"0": map[string]interface{}{
-						"host":  "something.com",
-						"paths": []string{"/"},
-					},
-				},
-			}
-			function := nuclioio.NuclioFunction{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "my-function" + testCase.name,
-				},
-				Spec: functionconfig.Spec{
-					Replicas: &one,
-					Triggers: map[string]functionconfig.Trigger{
-						defaultHTTPTrigger.Name: defaultHTTPTrigger,
-					},
-				},
-			}
+			function := suite.generateFunctionWithIngress(testCase.name, "", testCase.functionIngressAnnotations)
 			functionLabels := suite.client.getFunctionLabels(&function)
-			functionLabels["nuclio.io/function-name"] = function.Name
+			functionLabels[common.NuclioResourceLabelKeyFunctionName] = function.Name
 
 			// "create the ingress
 			ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, functionLabels, &function)
@@ -211,9 +190,128 @@ func (suite *lazyTestSuite) TestEnrichIngressWithDefaultAnnotations() {
 			delete(ingressInstance.Annotations, "nginx.ingress.kubernetes.io/configuration-snippet")
 			suite.Require().Equal(testCase.expectedFunctionIngressAnnotations,
 				ingressInstance.Annotations)
-
 		})
 	}
+}
+
+func (suite *lazyTestSuite) TestEnrichIngressWithDefaultIngressClassName() {
+	defaultIngressClassName := "my-ingress-class"
+	suite.client.SetPlatformConfigurationProvider(&mockedPlatformConfigurationProvider{
+		platformConfiguration: &platformconfig.Config{
+			Kube: platformconfig.PlatformKubeConfig{
+				DefaultHTTPIngressClassName: defaultIngressClassName,
+			},
+		},
+	})
+
+	function := suite.generateFunctionWithIngress("function-name", "", nil)
+	functionLabels := suite.client.getFunctionLabels(&function)
+	functionLabels[common.NuclioResourceLabelKeyFunctionName] = function.Name
+
+	// "create the ingress
+	ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, functionLabels, &function)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(ingressInstance)
+	suite.Require().Equal(defaultIngressClassName, *ingressInstance.Spec.IngressClassName)
+}
+
+func (suite *lazyTestSuite) TestEnrichIngressTLS() {
+	sslRedirectAnnotation := "nginx.ingress.kubernetes.io/ssl-redirect"
+
+	for _, testCase := range []struct {
+		name              string
+		enableSSLRedirect bool
+		tlsSecret         string
+	}{
+		{
+			name:              "no-tls-secret-no-ssl-redirect",
+			enableSSLRedirect: false,
+			tlsSecret:         "",
+		},
+		{
+			name:              "no-tls-secret-ssl-redirect",
+			enableSSLRedirect: true,
+			tlsSecret:         "",
+		},
+		{
+			name:              "tls-secret-no-ssl-redirect",
+			enableSSLRedirect: false,
+			tlsSecret:         "my-tls-secret",
+		},
+	} {
+		suite.Run(testCase.name, func() {
+			suite.client.SetPlatformConfigurationProvider(&mockedPlatformConfigurationProvider{
+				platformConfiguration: &platformconfig.Config{
+					IngressConfig: platformconfig.IngressConfig{
+						TLSSecret:         testCase.tlsSecret,
+						EnableSSLRedirect: testCase.enableSSLRedirect,
+					},
+				},
+			})
+			host := "something.com"
+			function := suite.generateFunctionWithIngress(testCase.name, host, nil)
+			functionLabels := suite.client.getFunctionLabels(&function)
+
+			ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, functionLabels, &function)
+			suite.Require().NoError(err)
+			suite.Require().NotNil(ingressInstance)
+
+			if testCase.enableSSLRedirect {
+				suite.Require().Equal("true", ingressInstance.Annotations[sslRedirectAnnotation])
+			} else {
+				suite.Require().NotContains(ingressInstance.Annotations, sslRedirectAnnotation)
+			}
+			if testCase.tlsSecret != "" {
+				suite.Require().Equal(testCase.tlsSecret, ingressInstance.Spec.TLS[0].SecretName)
+				suite.Require().Equal(host, ingressInstance.Spec.TLS[0].Hosts[0])
+			} else {
+				suite.Require().Empty(ingressInstance.Spec.TLS)
+			}
+		})
+	}
+}
+
+func (suite *lazyTestSuite) TestEnrichIngressWithDefaultTLSSecret() {
+	tlsSecretName := "my-secret"
+	suite.client.SetPlatformConfigurationProvider(&mockedPlatformConfigurationProvider{
+		platformConfiguration: &platformconfig.Config{
+			IngressConfig: platformconfig.IngressConfig{
+				TLSSecret:         tlsSecretName,
+				EnableSSLRedirect: true,
+			},
+		},
+	})
+	one := 1
+	defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
+	defaultHTTPTrigger.Attributes = map[string]interface{}{
+		"ingresses": map[string]interface{}{
+			"0": map[string]interface{}{
+				"host":  "something.com",
+				"paths": []string{"/"},
+			},
+		},
+	}
+	function := nuclioio.NuclioFunction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "my-function",
+		},
+		Spec: functionconfig.Spec{
+			Replicas: &one,
+			Triggers: map[string]functionconfig.Trigger{
+				defaultHTTPTrigger.Name: defaultHTTPTrigger,
+			},
+		},
+	}
+	// "create the ingress
+	ingressInstance, err := suite.client.createOrUpdateIngress(suite.ctx, map[string]string{}, &function)
+	suite.Require().NoError(err)
+	suite.Require().NotNil(ingressInstance)
+
+	// make sure default TLS secret exists
+	sslRedirectAnnotation := "nginx.ingress.kubernetes.io/ssl-redirect"
+	suite.Require().Equal(ingressInstance.Spec.TLS[0].SecretName, tlsSecretName)
+	suite.Require().Contains(ingressInstance.Annotations, sslRedirectAnnotation)
+	suite.Require().Equal("true", ingressInstance.Annotations[sslRedirectAnnotation])
 }
 
 func (suite *lazyTestSuite) TestNoChanges() {
@@ -223,7 +321,7 @@ func (suite *lazyTestSuite) TestNoChanges() {
 	defaultHTTPTrigger.Attributes = map[string]interface{}{
 		"ingresses": map[string]interface{}{
 			"0": map[string]interface{}{
-				"hostTemplate": "@nuclio.fromDefault",
+				"hostTemplate": common.DefaultIngressHostTemplate,
 				"paths":        []string{"/"},
 			},
 		},
@@ -235,7 +333,7 @@ func (suite *lazyTestSuite) TestNoChanges() {
 			Labels: map[string]string{
 
 				// we want the created ingress host to exceed the length limitation
-				"nuclio.io/project-name": common.GenerateRandomString(60, common.SmallLettersAndNumbers),
+				common.NuclioResourceLabelKeyProjectName: common.GenerateRandomString(60, common.SmallLettersAndNumbers),
 			},
 		},
 		Spec: functionconfig.Spec{
@@ -267,7 +365,7 @@ func (suite *lazyTestSuite) TestNoChanges() {
 		},
 	}
 	functionLabels := suite.client.getFunctionLabels(&function)
-	functionLabels["nuclio.io/function-name"] = function.Name
+	functionLabels[common.NuclioResourceLabelKeyFunctionName] = function.Name
 
 	// mock volume secret creation
 	_, err := suite.client.kubeClientSet.CoreV1().Secrets("test-namespace").Create(suite.ctx, &v1.Secret{
@@ -275,7 +373,7 @@ func (suite *lazyTestSuite) TestNoChanges() {
 			Name: "my-volume-secret",
 			Labels: map[string]string{
 				common.NuclioResourceLabelKeyFunctionName: function.Name,
-				common.NuclioResourceLabelKeyProjectName:  function.Labels["nuclio.io/project-name"],
+				common.NuclioResourceLabelKeyProjectName:  function.Labels[common.NuclioResourceLabelKeyProjectName],
 				common.NuclioResourceLabelKeyVolumeName:   volumeName,
 			},
 			CreationTimestamp: metav1.Time{
@@ -357,7 +455,7 @@ func (suite *lazyTestSuite) TestNoTriggers() {
 
 	// get labels
 	labels := map[string]string{
-		"nuclio.io/function-version": "latest",
+		common.NuclioLabelKeyFunctionVersion: "latest",
 	}
 
 	err := suite.client.populateIngressConfig(suite.ctx,
@@ -385,7 +483,7 @@ func (suite *lazyTestSuite) TestTriggerDefinedNoIngresses() {
 
 	// get labels
 	labels := map[string]string{
-		"nuclio.io/function-version": "latest",
+		common.NuclioLabelKeyFunctionVersion: "latest",
 	}
 
 	// ensure no ingress rules are populated
@@ -482,7 +580,7 @@ func (suite *lazyTestSuite) TestTriggerDefinedMultipleIngresses() {
 
 	// get labels
 	labels := map[string]string{
-		"nuclio.io/function-version": "latest",
+		common.NuclioLabelKeyFunctionVersion: "latest",
 	}
 
 	err := suite.client.populateIngressConfig(suite.ctx,
@@ -534,20 +632,20 @@ func (suite *lazyTestSuite) TestPlatformServicePorts() {
 		},
 	})
 	suite.Require().Len(servicePorts, 1)
-	suite.Require().Equal(servicePorts[0].Name, containerMetricPortName)
-	suite.Require().Equal(servicePorts[0].Port, int32(containerMetricPort))
+	suite.Require().Equal(servicePorts[0].Name, abstract.FunctionContainerMetricPortName)
+	suite.Require().Equal(servicePorts[0].Port, int32(abstract.FunctionContainerMetricPort))
 
 	// ensure metric port
 	toServicePorts := suite.client.ensureServicePortsExist([]v1.ServicePort{
 		{
-			Name:     ContainerHTTPPortName,
+			Name:     abstract.FunctionContainerHTTPPortName,
 			Port:     int32(abstract.FunctionContainerHTTPPort),
 			NodePort: 12345,
 		},
 	}, []v1.ServicePort{
 		{
-			Name: containerMetricPortName,
-			Port: int32(containerMetricPort),
+			Name: abstract.FunctionContainerMetricPortName,
+			Port: int32(abstract.FunctionContainerMetricPort),
 		},
 	})
 
@@ -556,14 +654,14 @@ func (suite *lazyTestSuite) TestPlatformServicePorts() {
 
 	toServicePorts = suite.client.ensureServicePortsExist([]v1.ServicePort{
 		{
-			Name:     ContainerHTTPPortName,
+			Name:     abstract.FunctionContainerHTTPPortName,
 			Port:     int32(abstract.FunctionContainerHTTPPort),
 			NodePort: 12345,
 		},
 	}, []v1.ServicePort{
 		{
-			Name: containerMetricPortName,
-			Port: int32(containerMetricPort),
+			Name: abstract.FunctionContainerMetricPortName,
+			Port: int32(abstract.FunctionContainerMetricPort),
 		},
 	})
 
@@ -578,7 +676,7 @@ func (suite *lazyTestSuite) TestEnrichDeploymentFromPlatformConfiguration() {
 				{
 					LabelSelector: metav1.LabelSelector{
 						MatchLabels: map[string]string{
-							"nuclio.io/class": "function",
+							common.NuclioLabelKeyClass: "function",
 						},
 					},
 					FunctionConfig: functionconfig.Config{},
@@ -587,7 +685,7 @@ func (suite *lazyTestSuite) TestEnrichDeploymentFromPlatformConfiguration() {
 				{
 					LabelSelector: metav1.LabelSelector{
 						MatchLabels: map[string]string{
-							"nuclio.io/class": "function",
+							common.NuclioLabelKeyClass: "function",
 						},
 					},
 					FunctionConfig: functionconfig.Config{},
@@ -602,7 +700,7 @@ func (suite *lazyTestSuite) TestEnrichDeploymentFromPlatformConfiguration() {
 				{
 					LabelSelector: metav1.LabelSelector{
 						MatchLabels: map[string]string{
-							"nuclio.io/class": "notfunction",
+							common.NuclioLabelKeyClass: "notfunction",
 						},
 					},
 					FunctionConfig: functionconfig.Config{},
@@ -640,7 +738,7 @@ func (suite *lazyTestSuite) TestEnrichDeploymentFromPlatformConfiguration() {
 	functionInstance.Name = "func-name"
 	functionInstance.Namespace = "func-namespace"
 	functionInstance.Labels = map[string]string{
-		"nuclio.io/class": "function",
+		common.NuclioLabelKeyClass: "function",
 	}
 
 	deployment := appsv1.Deployment{}
@@ -720,7 +818,7 @@ func (suite *lazyTestSuite) TestFastFailOnAutoScalerEvents() {
 			suite.Require().NoError(err)
 
 			// call resolveFailFast
-			err = suite.client.resolveFailFast(suite.ctx, &podsList, time.Now())
+			_, err = suite.client.resolveFailFast(suite.ctx, &podsList, time.Now())
 			if testCase.expectedError {
 				suite.Require().Error(err)
 			} else {
@@ -769,8 +867,13 @@ func (suite *lazyTestSuite) TestResolveAutoScaleMetricSpec() {
 			CustomScalingMetricSpecs: []autosv2.MetricSpec{
 				{
 					Pods: &autosv2.PodsMetricSource{
-						MetricName:         "another-custom-metric",
-						TargetAverageValue: podTargetValue,
+						Metric: autosv2.MetricIdentifier{
+							Name: "another-custom-metric",
+						},
+						Target: autosv2.MetricTarget{
+							Type:         autosv2.AverageValueMetricType,
+							AverageValue: &podTargetValue,
+						},
 					},
 				},
 			},
@@ -786,15 +889,49 @@ func (suite *lazyTestSuite) TestResolveAutoScaleMetricSpec() {
 	for _, metricSpec := range resolvedMetricSpec {
 		switch metricSpec.Type {
 		case autosv2.ResourceMetricSourceType:
-			suite.Require().Equal(*metricSpec.Resource.TargetAverageUtilization, int32(resourceTargetValue))
+
+			// TargetAverageUtilization
+			suite.Require().Equal(*metricSpec.Resource.Target.AverageUtilization, int32(resourceTargetValue))
 
 		case autosv2.ExternalMetricSourceType:
-			suite.Require().True(metricSpec.External.TargetValue.Equal(externalQuantity))
+			suite.Require().True(metricSpec.External.Target.Value.Equal(externalQuantity))
 
 		case autosv2.PodsMetricSourceType:
-			suite.Require().True(metricSpec.Pods.TargetAverageValue.Equal(podTargetValue))
+			suite.Require().True(metricSpec.Pods.Target.AverageValue.Equal(podTargetValue))
 		}
 	}
+}
+
+func (suite *lazyTestSuite) generateFunctionWithIngress(functionName, host string, annotations map[string]string) nuclioio.NuclioFunction {
+	one := 1
+	if host == "" {
+		host = "something.com"
+	}
+	defaultHTTPTrigger := functionconfig.GetDefaultHTTPTrigger()
+	defaultHTTPTrigger.Attributes = map[string]interface{}{
+		"ingresses": map[string]interface{}{
+			"0": map[string]interface{}{
+				"host":  host,
+				"paths": []string{"/"},
+			},
+		},
+	}
+	if annotations != nil {
+		defaultHTTPTrigger.Annotations = annotations
+	}
+
+	function := nuclioio.NuclioFunction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: functionName,
+		},
+		Spec: functionconfig.Spec{
+			Replicas: &one,
+			Triggers: map[string]functionconfig.Trigger{
+				defaultHTTPTrigger.Name: defaultHTTPTrigger,
+			},
+		},
+	}
+	return function
 }
 
 func (suite *lazyTestSuite) getIngressRuleByHost(rules []networkingv1.IngressRule, host string) *networkingv1.IngressRule {

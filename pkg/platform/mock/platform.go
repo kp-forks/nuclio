@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -55,6 +55,16 @@ func (mp *Platform) GetConfig() *platformconfig.Config {
 	return args.Get(0).(*platformconfig.Config)
 }
 
+func (mp *Platform) GetFunctionScrubber() *functionconfig.Scrubber {
+	args := mp.Called()
+	return args.Get(0).(*functionconfig.Scrubber)
+}
+
+func (mp *Platform) GetAPIGatewayScrubber() *platform.APIGatewayScrubber {
+	args := mp.Called()
+	return args.Get(0).(*platform.APIGatewayScrubber)
+}
+
 func (mp *Platform) GetContainerBuilderKind() string {
 	args := mp.Called()
 	return args.Get(0).(string)
@@ -92,6 +102,11 @@ func (mp *Platform) ValidateFunctionConfig(ctx context.Context, functionConfig *
 	return args.Error(0)
 }
 
+func (mp *Platform) AutoFixConfiguration(ctx context.Context, err error, functionConfig *functionconfig.Config) bool {
+	args := mp.Called(ctx, err, functionConfig)
+	return args.Bool(0)
+}
+
 // UpdateFunction will update a previously deployed function
 func (mp *Platform) UpdateFunction(ctx context.Context, updateFunctionOptions *platform.UpdateFunctionOptions) error {
 	args := mp.Called(ctx, updateFunctionOptions)
@@ -101,6 +116,11 @@ func (mp *Platform) UpdateFunction(ctx context.Context, updateFunctionOptions *p
 // DeleteFunction will delete a previously deployed function
 func (mp *Platform) DeleteFunction(ctx context.Context, deleteFunctionOptions *platform.DeleteFunctionOptions) error {
 	args := mp.Called(ctx, deleteFunctionOptions)
+	return args.Error(0)
+}
+
+func (mp *Platform) RedeployFunction(ctx context.Context, redeployFunctionOptions *platform.RedeployFunctionOptions) error {
+	args := mp.Called(ctx, redeployFunctionOptions)
 	return args.Error(0)
 }
 
@@ -130,8 +150,13 @@ func (mp *Platform) GetFunctionReplicaLogsStream(ctx context.Context, options *p
 }
 
 // GetFunctionReplicaNames returns function replica names (Pod / Container names)
-func (mp *Platform) GetFunctionReplicaNames(ctx context.Context, functionConfig *functionconfig.Config) ([]string, error) {
-	args := mp.Called(ctx, functionConfig)
+func (mp *Platform) GetFunctionReplicaNames(ctx context.Context, function platform.Function, permissionOptions opa.PermissionOptions) ([]string, error) {
+	args := mp.Called(ctx, function, permissionOptions)
+	return args.Get(0).([]string), args.Error(1)
+}
+
+func (mp *Platform) GetFunctionReplicaContainers(ctx context.Context, functionConfig *functionconfig.Config, replicaName string) ([]string, error) {
+	args := mp.Called(ctx, functionConfig, replicaName)
 	return args.Get(0).([]string), args.Error(1)
 }
 
@@ -161,6 +186,12 @@ func (mp *Platform) DeleteProject(ctx context.Context, deleteProjectOptions *pla
 func (mp *Platform) GetProjects(ctx context.Context, getProjectsOptions *platform.GetProjectsOptions) ([]platform.Project, error) {
 	args := mp.Called(ctx, getProjectsOptions)
 	return args.Get(0).([]platform.Project), args.Error(1)
+}
+
+// GetFunctionProject returns project instance for specific function
+func (mp *Platform) GetFunctionProject(ctx context.Context, functionConfig *functionconfig.Config) (platform.Project, error) {
+	args := mp.Called(ctx, functionConfig)
+	return args.Get(0).(platform.Project), args.Error(1)
 }
 
 func (mp *Platform) GetRuntimeBuildArgs(runtime runtime.Runtime) map[string]string {
@@ -267,6 +298,11 @@ func (mp *Platform) GetScaleToZeroConfiguration() *platformconfig.ScaleToZero {
 	return args.Get(0).(*platformconfig.ScaleToZero)
 }
 
+func (mp *Platform) GetDisableDefaultHttpTrigger() bool {
+	args := mp.Called()
+	return args.Get(0).(bool)
+}
+
 func (mp *Platform) GetAllowedAuthenticationModes() []string {
 	args := mp.Called()
 	return args.Get(0).([]string)
@@ -295,6 +331,10 @@ func (mp *Platform) GetDefaultInvokeIPAddresses() ([]string, error) {
 	return args.Get(0).([]string), args.Error(1)
 }
 
+func (mp *Platform) InitializeContainerBuilder() error {
+	return nil
+}
+
 func (mp *Platform) BuildAndPushContainerImage(ctx context.Context, buildOptions *containerimagebuilderpusher.BuildOptions) error {
 	return nil
 }
@@ -313,6 +353,10 @@ func (mp *Platform) GetBaseImageRegistry(registry string, runtime runtime.Runtim
 
 func (mp *Platform) GetOnbuildImageRegistry(registry string, runtime runtime.Runtime) (string, error) {
 	return "", nil
+}
+
+func (mp *Platform) GetRegistryKind() string {
+	return ""
 }
 
 func (mp *Platform) GetDefaultRegistryCredentialsSecretName() string {
@@ -354,20 +398,4 @@ func (mp *Platform) QueryOPAFunctionEventPermissions(projectName,
 	permissionOptions *opa.PermissionOptions) (bool, error) {
 	args := mp.Called(projectName, functionName, functionEventName, action, permissionOptions)
 	return args.Get(0).(bool), args.Error(1)
-}
-
-// GetFunctionSecrets returns all the function's secrets
-func (mp *Platform) GetFunctionSecrets(ctx context.Context, functionName, functionNamespace string) ([]platform.FunctionSecret, error) {
-	args := mp.Called(ctx, functionName, functionNamespace)
-	return args.Get(0).([]platform.FunctionSecret), args.Error(1)
-}
-
-func (mp *Platform) GetFunctionSecretMap(ctx context.Context, functionName, functionNamespace string) (map[string]string, error) {
-	args := mp.Called(ctx, functionName, functionNamespace)
-	return args.Get(0).(map[string]string), args.Error(1)
-}
-
-func (mp *Platform) GetFunctionSecretData(ctx context.Context, functionName, functionNamespace string) (map[string][]byte, error) {
-	args := mp.Called(ctx, functionName, functionNamespace)
-	return args.Get(0).(map[string][]byte), args.Error(1)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,14 @@ package functionconfig
 import (
 	"encoding/json"
 	"io"
+	"os"
 
 	"github.com/nuclio/nuclio/pkg/common"
 
-	"github.com/ghodss/yaml"
-	"github.com/imdario/mergo"
+	"dario.cat/mergo"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
+	"sigs.k8s.io/yaml"
 )
 
 type Reader struct {
@@ -99,6 +100,26 @@ func (r *Reader) Read(reader io.Reader, configType string, config *Config) error
 	}
 
 	r.enrichPostMergeConfig(config, &codeEntryConfig)
+
+	return nil
+}
+
+func (r *Reader) ReadFunctionConfigFile(functionConfigPath string, config *Config) error {
+
+	functionConfigFile, err := os.Open(functionConfigPath)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to open function configuration file: %s", functionConfigPath)
+	}
+
+	defer functionConfigFile.Close() // nolint: errcheck
+
+	// read the configuration
+	if err := r.Read(functionConfigFile,
+		"yaml",
+		config); err != nil {
+
+		return errors.Wrap(err, "Failed to read function configuration file")
+	}
 
 	return nil
 }

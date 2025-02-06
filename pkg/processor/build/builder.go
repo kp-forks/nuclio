@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
@@ -38,6 +39,16 @@ import (
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/processor/build/inlineparser"
 	"github.com/nuclio/nuclio/pkg/processor/build/runtime"
+	"github.com/nuclio/nuclio/pkg/processor/build/util"
+
+	"github.com/mholt/archiver/v4"
+	"github.com/mitchellh/mapstructure"
+	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
+	"github.com/nuclio/nuclio-sdk-go"
+	"github.com/v3io/version-go"
+	"gopkg.in/yaml.v3"
+
 	// load runtimes so that they register to runtime registry
 	_ "github.com/nuclio/nuclio/pkg/processor/build/runtime/dotnetcore"
 	_ "github.com/nuclio/nuclio/pkg/processor/build/runtime/golang"
@@ -46,27 +57,24 @@ import (
 	_ "github.com/nuclio/nuclio/pkg/processor/build/runtime/python"
 	_ "github.com/nuclio/nuclio/pkg/processor/build/runtime/ruby"
 	_ "github.com/nuclio/nuclio/pkg/processor/build/runtime/shell"
-	"github.com/nuclio/nuclio/pkg/processor/build/util"
-
-	"github.com/mholt/archiver/v3"
-	"github.com/mitchellh/mapstructure"
-	"github.com/nuclio/errors"
-	"github.com/nuclio/logger"
-	"github.com/nuclio/nuclio-sdk-go"
-	"github.com/v3io/version-go"
-	"gopkg.in/yaml.v3"
 )
 
 const (
-	FunctionConfigFileName = "function.yaml"
-	uhttpcImage            = "quay.io/nuclio/uhttpc:0.0.1-%s"
-	GitEntryType           = "git"
-	GithubEntryType        = "github"
-	ArchiveEntryType       = "archive"
-	S3EntryType            = "s3"
-	ImageEntryType         = "image"
-	SourceCodeEntryType    = "sourceCode"
+	uhttpcImage         = "quay.io/nuclio/uhttpc:0.0.1-%s"
+	GitEntryType        = "git"
+	ArchiveEntryType    = "archive"
+	S3EntryType         = "s3"
+	ImageEntryType      = "image"
+	SourceCodeEntryType = "sourceCode"
+	// TODO: Remove in 1.16.0
+	GithubEntryType = "github"
+
+	GithubURLRegexPattern = "^.*://.*github.com(?:/repos)?/(?P<org>[^/]+)/(?P<repo>[^/]+)/?$"
 )
+
+// githubURLRegex complies the GitHub URL regex once instead of every function build, to improve performance
+// TODO: Remove in 1.16.0
+var githubURLRegex = regexp.MustCompile(GithubURLRegexPattern)
 
 // holds parameters for things that are required before a runtime can be initialized
 type runtimeInfo struct {
@@ -166,6 +174,7 @@ func (b *Builder) Build(ctx context.Context, options *platform.CreateFunctionBui
 		"Function configuration found in directory",
 		"configFilePath", configFilePath)
 	if common.IsFile(configFilePath) {
+		// TODO: reconsider if we should read it again if it was already enriched in nuctl
 		if _, err = b.readConfiguration(); err != nil {
 			return nil, errors.Wrap(err, "Failed to read configuration")
 		}
@@ -190,7 +199,7 @@ func (b *Builder) Build(ctx context.Context, options *platform.CreateFunctionBui
 	// resolve the function path - download in case its a URL
 	b.options.FunctionConfig.Spec.Build.Path,
 		inferredCodeEntryType,
-		err = b.resolveFunctionPath(b.options.FunctionConfig.Spec.Build.Path)
+		err = b.resolveFunctionPath(ctx, b.options.FunctionConfig.Spec.Build.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -207,14 +216,16 @@ func (b *Builder) Build(ctx context.Context, options *platform.CreateFunctionBui
 		// see if there are any inline blocks in the code. ignore errors during parse / load / whatever
 		b.parseInlineBlocks() // nolint: errcheck
 
-		// dont fail on parseInlineBlocks so that if the parser fails on something we won't block deployments. the only
+		// don't fail on parseInlineBlocks so that if the parser fails on something we won't block deployments. the only
 		// exception is if the user provided a block with improper contents
 		if b.inlineConfigurationBlock.Error != nil {
 			return nil, errors.Wrap(b.inlineConfigurationBlock.Error, "Failed to parse inline configuration")
 		}
 
-		// populate function source code
-		b.populateFunctionSourceCodeFromFilePath()
+		// populate function source code only if needed
+		if b.options.FunctionConfig.Spec.Build.CodeEntryType == SourceCodeEntryType {
+			b.populateFunctionSourceCodeFromFilePath()
+		}
 	}
 
 	// prepare configuration from both configuration files and things builder infers
@@ -284,11 +295,6 @@ func (b *Builder) Build(ctx context.Context, options *platform.CreateFunctionBui
 // GetFunctionPath returns the path to the function
 func (b *Builder) GetFunctionPath() string {
 	return b.options.FunctionConfig.Spec.Build.Path
-}
-
-// GetProjectName returns the name of the project
-func (b *Builder) GetProjectName() string {
-	return b.options.FunctionConfig.Meta.Labels[common.NuclioResourceLabelKeyProjectName]
 }
 
 // GetFunctionName returns the name of the function
@@ -428,10 +434,9 @@ func (b *Builder) initializeSupportedRuntimes() {
 	b.runtimeInfo["shell"] = runtimeInfo{"sh", poundParser, 0}
 	b.runtimeInfo["golang"] = runtimeInfo{"go", slashSlashParser, 0}
 	b.runtimeInfo["python"] = runtimeInfo{"py", poundParser, 10}
-	b.runtimeInfo["python:3.6"] = runtimeInfo{"py", poundParser, 5}
-	b.runtimeInfo["python:3.7"] = runtimeInfo{"py", poundParser, 5}
-	b.runtimeInfo["python:3.8"] = runtimeInfo{"py", poundParser, 5}
 	b.runtimeInfo["python:3.9"] = runtimeInfo{"py", poundParser, 5}
+	b.runtimeInfo["python:3.10"] = runtimeInfo{"py", poundParser, 5}
+	b.runtimeInfo["python:3.11"] = runtimeInfo{"py", poundParser, 5}
 	b.runtimeInfo["nodejs"] = runtimeInfo{"js", slashSlashParser, 0}
 	b.runtimeInfo["java"] = runtimeInfo{"java", slashSlashParser, 0}
 	b.runtimeInfo["ruby"] = runtimeInfo{"rb", poundParser, 0}
@@ -441,10 +446,13 @@ func (b *Builder) initializeSupportedRuntimes() {
 func (b *Builder) readConfiguration() (string, error) {
 
 	if functionConfigPath := b.providedFunctionConfigFilePath(); functionConfigPath != "" {
-		if err := b.readFunctionConfigFile(functionConfigPath); err != nil {
+		functionconfigReader, err := functionconfig.NewReader(b.logger)
+		if err != nil {
+			return "", errors.Wrap(err, "Failed to create functionconfig reader")
+		}
+		if err := functionconfigReader.ReadFunctionConfigFile(functionConfigPath, &b.options.FunctionConfig); err != nil {
 			return "", errors.Wrap(err, "Failed to read function configuration")
 		}
-
 		return functionConfigPath, nil
 	}
 
@@ -461,13 +469,13 @@ func (b *Builder) providedFunctionConfigFilePath() string {
 	// if the user only provided a function file, check if it had a function configuration file
 	// in an inline configuration block (@nuclio.configure)
 	if common.IsFile(b.options.FunctionConfig.Spec.Build.Path) {
-		inlineFunctionConfig, found := b.inlineConfigurationBlock.Contents[FunctionConfigFileName]
+		inlineFunctionConfig, found := b.inlineConfigurationBlock.Contents[common.FunctionConfigFileName]
 		if !found {
 			return ""
 		}
 
 		// create a temporary file containing the contents and return that
-		functionConfigPath, err := b.createTempFileFromYAML(FunctionConfigFileName, inlineFunctionConfig)
+		functionConfigPath, err := b.createTempFileFromYAML(common.FunctionConfigFileName, inlineFunctionConfig)
 
 		b.logger.DebugWith("Function configuration generated from inline", "path", functionConfigPath)
 
@@ -478,7 +486,7 @@ func (b *Builder) providedFunctionConfigFilePath() string {
 		b.logger.WarnWith("Failed to unmarshal inline configuration - ignoring", "err", err)
 	}
 
-	functionConfigPath := filepath.Join(b.options.FunctionConfig.Spec.Build.Path, FunctionConfigFileName)
+	functionConfigPath := filepath.Join(b.options.FunctionConfig.Spec.Build.Path, common.FunctionConfigFileName)
 
 	if !common.FileExists(functionConfigPath) {
 		return ""
@@ -500,6 +508,11 @@ func (b *Builder) validateAndEnrichConfiguration() error {
 	// python is just a reference
 	if b.options.FunctionConfig.Spec.Runtime == "python" {
 		b.options.FunctionConfig.Spec.Runtime = "python:3.9"
+	}
+
+	// enrich project name
+	if _, err := b.options.FunctionConfig.GetProjectName(); err != nil {
+		b.options.FunctionConfig.Meta.Labels[common.NuclioResourceLabelKeyProjectName] = platform.DefaultProjectName
 	}
 
 	// if the function handler isn't set, ask runtime
@@ -565,8 +578,11 @@ func (b *Builder) getImage() (string, error) {
 				repository = ""
 			}
 		}
-
-		imagePrefix, err := b.platform.RenderImageNamePrefixTemplate(b.GetProjectName(), b.GetFunctionName())
+		projectName, err := b.options.FunctionConfig.GetProjectName()
+		if err != nil {
+			return "", errors.Wrap(err, "Failed to get project for the function")
+		}
+		imagePrefix, err := b.platform.RenderImageNamePrefixTemplate(projectName, b.GetFunctionName())
 
 		if err != nil {
 			return "", errors.Wrap(err, "Failed to render image name prefix template")
@@ -636,7 +652,7 @@ func (b *Builder) writeFunctionSourceCodeToTempFile(functionSourceCode string) (
 	return sourceFilePath, nil
 }
 
-func (b *Builder) resolveFunctionPath(functionPath string) (string, string, error) {
+func (b *Builder) resolveFunctionPath(ctx context.Context, functionPath string) (string, string, error) {
 	var err error
 	var inferredCodeEntryType string
 
@@ -676,7 +692,7 @@ func (b *Builder) resolveFunctionPath(functionPath string) (string, string, erro
 
 	// if the function path is a URL, type is Github or S3 - first download the file
 	// for backwards compatibility, don't check for entry type url specifically
-	if functionPath, err = b.resolveFunctionPathFromURL(functionPath, codeEntryType); err != nil {
+	if functionPath, err = b.resolveFunctionPathFromURL(ctx, functionPath, codeEntryType); err != nil {
 		return "", "", errors.Wrap(err, "Failed to download function from the given URL")
 	}
 
@@ -691,7 +707,7 @@ func (b *Builder) resolveFunctionPath(functionPath string) (string, string, erro
 	}
 
 	// when no code entry type was passed and it's an archive or jar
-	if codeEntryType == "" && (util.IsCompressed(resolvedPath) || util.IsJar(resolvedPath) || common.IsDir(resolvedPath)) {
+	if codeEntryType == "" && (util.IsArchive(resolvedPath) || util.IsJar(resolvedPath) || common.IsDir(resolvedPath)) {
 
 		// if it's a URL, set it as an archive code entry type, otherwise save the built image so it'll be possible to redeploy
 		if isURL {
@@ -701,10 +717,10 @@ func (b *Builder) resolveFunctionPath(functionPath string) (string, string, erro
 		}
 	}
 
-	if util.IsCompressed(resolvedPath) {
-		resolvedPath, err = b.decompressFunctionArchive(resolvedPath)
+	if util.IsArchive(resolvedPath) {
+		resolvedPath, err = b.extractFunctionArchive(ctx, resolvedPath)
 		if err != nil {
-			return "", "", errors.Wrap(err, "Failed to decompress function archive")
+			return "", "", errors.Wrap(err, "Failed to extract function archive")
 		}
 	}
 
@@ -737,31 +753,67 @@ func (b *Builder) validateAndParseS3Attributes(attributes map[string]interface{}
 
 func (b *Builder) getFunctionPathFromGithubURL(functionPath string) (string, error) {
 	if branch, ok := b.options.FunctionConfig.Spec.Build.CodeEntryAttributes["branch"]; ok {
-		functionPath = fmt.Sprintf("%s/archive/%s.zip",
-			strings.TrimRight(functionPath, "/"),
-			branch)
+		var err error
+		if functionPath, err = b.generateGithubZipballURL(functionPath, branch.(string)); err != nil {
+			return "", errors.Wrap(err, "Failed to generate github zipball URL")
+		}
 	} else {
-		return "", errors.New("If code entry type is github, branch must be provided")
+		return "", errors.New("If code entry type is GitHub, branch must be provided")
 	}
 	return functionPath, nil
 }
 
-func (b *Builder) decompressFunctionArchive(functionPath string) (string, error) {
+// generateGithubZipballURL generates the URL for downloading the branch's zip archive from GitHub
+func (b *Builder) generateGithubZipballURL(functionPath, branch string) (string, error) {
+	// split the URL to get the ORG and REPO using regex
+	org, repo, err := b.extractOrgAndRepoFromGithubURL(functionPath)
+	if err != nil {
+		return "", errors.Wrap(err, "Failed to resolve GitHub URL components")
+	}
+
+	// create the URL for downloading the zipball GitHub api
+	return fmt.Sprintf("https://api.github.com/repos/%s/%s/zipball/%s", org, repo, branch), nil
+}
+
+// extractOrgAndRepoFromGithubURL extracts the org and repo from a GitHub URL
+func (b *Builder) extractOrgAndRepoFromGithubURL(url string) (string, string, error) {
+	match := githubURLRegex.FindStringSubmatch(url)
+	if match == nil {
+		return "", "", errors.New("Failed to match GitHub URL")
+	}
+
+	result := map[string]string{}
+	for i, name := range githubURLRegex.SubexpNames() {
+		if i != 0 && name != "" {
+			result[name] = match[i]
+		}
+	}
+
+	org, orgOk := result["org"]
+	repo, repoOk := result["repo"]
+	if !orgOk || !repoOk {
+		return "", "", errors.New("Failed to extract org and repo from GitHub URL")
+	}
+
+	return org, repo, nil
+}
+
+func (b *Builder) extractFunctionArchive(ctx context.Context, functionPath string) (string, error) {
 
 	// create a staging directory
 	decompressDir, err := b.mkDirUnderTemp("decompress")
 	if err != nil {
-		return "", errors.Wrapf(err, "Failed to create temporary directory for decompressing archive %v", functionPath)
+		return "", errors.Wrapf(err, "Failed to create temporary directory for extracting archive %v", functionPath)
 	}
 
-	decompressor, err := util.NewDecompressor(b.logger)
+	unarchiver, err := util.NewUnarchiver(b.logger)
 	if err != nil {
-		return "", errors.Wrap(err, "Failed to instantiate decompressor")
+		return "", errors.Wrap(err, "Failed to instantiate unarchiver")
 	}
 
-	err = decompressor.Decompress(functionPath, decompressDir)
+	err = unarchiver.Extract(ctx, functionPath, decompressDir)
 	if err != nil {
-		return "", errors.Wrapf(err, "Failed to decompress file %s", functionPath)
+		return "", errors.Wrapf(err, "Failed to extract file %s", functionPath)
 	}
 
 	codeEntryType := b.options.FunctionConfig.Spec.Build.CodeEntryType
@@ -810,40 +862,6 @@ func (b *Builder) resolveUserSpecifiedWorkdir(mainDir string) (string, error) {
 	return mainDir, nil
 }
 
-func (b *Builder) readFunctionConfigFile(functionConfigPath string) error {
-
-	// read the file once for logging
-	functionConfigContents, err := os.ReadFile(functionConfigPath)
-	if err != nil {
-		return errors.Wrap(err, "Failed to read function configuration file")
-	}
-
-	// log
-	b.logger.DebugWith("Read function configuration file", "contents", string(functionConfigContents))
-
-	functionConfigFile, err := os.Open(functionConfigPath)
-	if err != nil {
-		return errors.Wrapf(err, "Failed to open function configuration file: %s", functionConfigPath)
-	}
-
-	defer functionConfigFile.Close() // nolint: errcheck
-
-	functionconfigReader, err := functionconfig.NewReader(b.logger)
-	if err != nil {
-		return errors.Wrap(err, "Failed to create functionconfig reader")
-	}
-
-	// read the configuration
-	if err := functionconfigReader.Read(functionConfigFile,
-		"yaml",
-		&b.options.FunctionConfig); err != nil {
-
-		return errors.Wrap(err, "Failed to read function configuration file")
-	}
-
-	return nil
-}
-
 func (b *Builder) createRuntime() (runtime.Runtime, error) {
 	runtimeName, err := b.getRuntimeName()
 	if err != nil {
@@ -878,7 +896,7 @@ func (b *Builder) getRuntimeName() (string, error) {
 
 		// if the function path is a directory, runtime must be specified in the command-line arguments or configuration
 		if common.IsDir(b.options.FunctionConfig.Spec.Build.Path) {
-			if common.FileExists(path.Join(b.options.FunctionConfig.Spec.Build.Path, FunctionConfigFileName)) {
+			if common.FileExists(path.Join(b.options.FunctionConfig.Spec.Build.Path, common.FunctionConfigFileName)) {
 				return "", errors.New("Build path is directory - function.yaml must specify runtime")
 			}
 
@@ -943,6 +961,8 @@ func (b *Builder) prepareStagingDir() error {
 
 	// make sure the handler staging dir exists
 	handlerDirIncludingSubPath := path.Join(handlerDirInStaging, handlerSubPath)
+
+	// we need 755 permission to allow running nuclio function with non-root SecurityContext
 	if err := os.MkdirAll(handlerDirIncludingSubPath, 0755); err != nil {
 		return errors.Wrapf(err, "Failed to create handler path in staging @ %s", handlerDirIncludingSubPath)
 	}
@@ -1023,6 +1043,7 @@ func (b *Builder) cleanupTempDir() error {
 
 func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 	buildArgs := b.getBuildArgs()
+	buildFlags := b.getBuildFlags()
 
 	// get override base and onbuild image registries from the platform configuration
 
@@ -1058,6 +1079,11 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 	taggedImageName := fmt.Sprintf("%s:%s", b.processorImage.imageName, b.processorImage.imageTag)
 	registryURL := b.options.FunctionConfig.Spec.Build.Registry
 
+	enrichedNodeSelector, err := b.resolveNodeSelector(ctx)
+	if err != nil {
+		return "", errors.Wrap(err, "Failed to enrich NodeSelector for image builder")
+	}
+
 	b.logger.InfoWithCtx(ctx,
 		"Building processor image",
 		"registryURL", registryURL,
@@ -1075,6 +1101,7 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 			Pull:                b.options.FunctionConfig.Spec.Build.NoCache,
 			NoCache:             b.options.FunctionConfig.Spec.Build.NoCache,
 			NoBaseImagePull:     b.GetNoBaseImagePull(),
+			BuildFlags:          buildFlags,
 			BuildArgs:           buildArgs,
 			RegistryURL:         registryURL,
 			RepoName:            b.resolveRepoName(registryURL),
@@ -1083,15 +1110,17 @@ func (b *Builder) buildProcessorImage(ctx context.Context) (string, error) {
 			BuildTimeoutSeconds: b.resolveBuildTimeoutSeconds(),
 
 			// kaniko pod attributes
-			NodeSelector:       b.options.FunctionConfig.Spec.NodeSelector,
-			NodeName:           b.options.FunctionConfig.Spec.NodeName,
-			Affinity:           b.options.FunctionConfig.Spec.Affinity,
-			PriorityClassName:  b.options.FunctionConfig.Spec.PriorityClassName,
-			Tolerations:        b.options.FunctionConfig.Spec.Tolerations,
-			ServiceAccountName: b.options.FunctionConfig.Spec.ServiceAccount,
+			NodeSelector:           enrichedNodeSelector,
+			NodeName:               b.options.FunctionConfig.Spec.NodeName,
+			Affinity:               b.options.FunctionConfig.Spec.Affinity,
+			PriorityClassName:      b.options.FunctionConfig.Spec.PriorityClassName,
+			Tolerations:            b.options.FunctionConfig.Spec.Tolerations,
+			FunctionServiceAccount: b.options.FunctionConfig.Spec.ServiceAccount,
+			BuilderServiceAccount:  b.options.FunctionConfig.Spec.Build.BuilderServiceAccount,
 			ReadinessTimeoutSeconds: b.platform.GetConfig().GetFunctionReadinessTimeoutOrDefault(
 				b.options.FunctionConfig.Spec.ReadinessTimeoutSeconds),
 			SecurityContext: b.options.FunctionConfig.Spec.SecurityContext,
+			BuildLogger:     b.logger,
 		})
 
 	return taggedImageName, err
@@ -1367,7 +1396,7 @@ func (b *Builder) getProcessorDockerfileBaseImage(runtimeDefaultBaseImage string
 			return runtimeDefaultBaseImage
 		}
 
-		// if a non empty baseImageRegistry was passed, use it as a registry prefix for the default base image
+		// if a non-empty baseImageRegistry was passed, use it as a registry prefix for the default base image
 		sepIndex := strings.Index(runtimeDefaultBaseImage, "/")
 		if sepIndex != -1 {
 			runtimeDefaultBaseImage = runtimeDefaultBaseImage[sepIndex+1:]
@@ -1377,6 +1406,8 @@ func (b *Builder) getProcessorDockerfileBaseImage(runtimeDefaultBaseImage string
 	// if user specified something - use that, as is
 	// see description on https://github.com/nuclio/nuclio/pull/1544 - we don't implicitly mutate the given baseimage
 	default:
+		b.logger.WarnWith("Using user provided base image, runtime interpreter version is provided by the base image",
+			"baseImage", b.options.FunctionConfig.Spec.Build.BaseImage)
 		return b.options.FunctionConfig.Spec.Build.BaseImage
 	}
 }
@@ -1446,6 +1477,18 @@ func (b *Builder) getBuildArgs() map[string]string {
 	buildArgs["NUCLIO_BUILD_LOCAL_HANDLER_DIR"] = "handler"
 
 	return buildArgs
+}
+
+func (b *Builder) getBuildFlags() map[string]bool {
+	buildFlags := map[string]bool{}
+
+	// all possible flags are here https://github.com/GoogleContainerTools/kaniko
+	// https://docs.docker.com/engine/reference/commandline/image_build/
+
+	for _, flag := range b.options.FunctionConfig.Spec.Build.Flags {
+		buildFlags[common.Quote(flag)] = true
+	}
+	return buildFlags
 }
 
 func (b *Builder) commandsToDirectives(commands []string) (map[string][]functionconfig.Directive, error) {
@@ -1579,11 +1622,13 @@ func (b *Builder) renderDependantImageURL(imageURL string, dependantImagesRegist
 	return renderedImageURL, nil
 }
 
-func (b *Builder) resolveFunctionPathFromURL(functionPath string, codeEntryType string) (string, error) {
+func (b *Builder) resolveFunctionPathFromURL(ctx context.Context, functionPath string, codeEntryType string) (string, error) {
 	var err error
 
 	if common.IsURL(functionPath) || codeEntryType == S3EntryType {
 		if codeEntryType == GithubEntryType {
+			b.logger.WarnCtx(ctx, "'GitHub' code entry type is deprecated and will be removed in Nuclio 1.16.x, "+
+				"please use 'Git' entry type instead")
 			functionPath, err = b.getFunctionPathFromGithubURL(functionPath)
 			if err != nil {
 				return "", errors.Wrapf(err, "Failed to infer function path of github entry type")
@@ -1631,7 +1676,7 @@ func (b *Builder) resolveFunctionPathFromURL(functionPath string, codeEntryType 
 			return "", errors.Wrap(err, "Failed to download file")
 		}
 
-		if isArchive && !util.IsCompressed(tempFile.Name()) {
+		if isArchive && !util.IsArchive(tempFile.Name()) {
 			return "", errors.New("Downloaded file type is not supported. (expected an archive)")
 		}
 
@@ -1648,21 +1693,6 @@ func (b *Builder) getS3FunctionItemKey() (string, error) {
 	}
 
 	return s3Attributes["s3ItemKey"], nil
-}
-
-func (b *Builder) resolveCodeEntryAttributeAsString(attribute string) string {
-	if value, found := b.options.FunctionConfig.Spec.Build.CodeEntryAttributes[attribute]; found {
-		switch typedValue := value.(type) {
-		case string:
-			return typedValue
-		case int, int8, int16, int32, int64:
-			return fmt.Sprintf("%d", typedValue)
-		case float32, float64:
-			return fmt.Sprintf("%f", typedValue)
-		}
-	}
-
-	return ""
 }
 
 func (b *Builder) parseGitAttributes() (*gitcommon.Attributes, error) {
@@ -1779,20 +1809,28 @@ func (b *Builder) getFunctionTempFile(tempDir string,
 	}
 
 	// for archives, use a temporary local file renamed to something short to allow wacky long archive URLs
-	if isArchive || util.IsCompressed(functionPathBase) {
+	if isArchive || util.IsArchive(functionPath) {
 		var fileExtension string
 
 		// get file archiver by its extension
-		fileArchiver, err := archiver.ByExtension(functionPath)
+		archiverFormat, _, err := archiver.Identify(functionPath, nil)
 		if err != nil {
 
-			// fallback to .zip
-			b.logger.DebugWith("Could not determine file extension, fallback to .zip",
-				"functionPath",
-				functionPath)
-			fileExtension = "zip"
+			// try identifying to the file extension
+			if extension := strings.TrimPrefix(filepath.Ext(functionPath), "."); extension == "" {
+				// fallback to .zip
+				fileExtension = "zip"
+				b.logger.DebugWith("Could not determine file extension, fallback to .zip",
+					"functionPath",
+					functionPath)
+			} else {
+				fileExtension = extension
+				b.logger.DebugWith("Could not identify archive format, fallback to file extension",
+					"functionPath", functionPath,
+					"fileExtension", fileExtension)
+			}
 		} else {
-			fileExtension = fmt.Sprint(fileArchiver)
+			fileExtension = strings.TrimPrefix(archiverFormat.Name(), ".")
 		}
 		return os.CreateTemp(tempDir, fmt.Sprintf("nuclio-function-*.%s", fileExtension))
 	}
@@ -1834,4 +1872,24 @@ func (b *Builder) resolveFunctionHealthCheckInterval() (time.Duration, error) {
 		}
 	}
 	return healthCheckInterval, nil
+}
+
+// resolveNodeSelector resolves builder NodeSelector from function, project and platform NodeSelectors,
+// where function values take precedence over project values, and project values take precedence over platform values
+func (b *Builder) resolveNodeSelector(ctx context.Context) (map[string]string, error) {
+	var builderNodeSelector map[string]string
+	project, err := b.platform.GetFunctionProject(ctx, &b.options.FunctionConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to get project for the function")
+	}
+	// enriching from both project and platform
+	builderNodeSelector = common.MergeNodeSelector(b.options.FunctionConfig.Spec.NodeSelector,
+		project.GetConfig().Spec.DefaultFunctionNodeSelector,
+		b.platform.GetConfig().Kube.DefaultFunctionNodeSelector)
+
+	b.logger.DebugWith("Enriched NodeSelector for image builder",
+		"builderNodeSelector", builderNodeSelector)
+
+	return builderNodeSelector, nil
+
 }

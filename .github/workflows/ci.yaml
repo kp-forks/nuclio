@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,11 @@ on:
     branches:
       - development
       - "[0-9]+.[0-9]+.x"
+    paths-ignore:
+      - 'docs/**'
+      - '.github/styles/**'
+      - 'README.md'
+      - 'README_zh.md'
 
   # Run CI also on push to master
   push:
@@ -27,32 +32,27 @@ on:
 
 env:
   REPO: quay.io
+  CACHE_REPO: ghcr.io
   REPO_NAME: nuclio
+  CACHE_REPO_NAME: ${{ github.repository_owner }}
   NUCLIO_LABEL: ${{ github.run_number }}
   NAMESPACE: nuclio
   NUCLIO_GO_TEST_TIMEOUT: "30m"
+  DOCKER_BUILDKIT: 1
+  GITHUB_ACTIONS_BOT_NAME: github-actions[bot]
+  GITHUB_ACTIONS_BOT_EMAIL: github-actions[bot]@users.noreply.github.com
 
 jobs:
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Dump github context
-        run: echo "$GITHUB_CONTEXT"
-        env:
-          GITHUB_CONTEXT: ${{ toJson(github) }}
-
-      - name: Dump runner context
-        run: echo "$RUNNER_CONTEXT"
-        env:
-          RUNNER_CONTEXT: ${{ toJson(runner) }}
-
       - uses: actions/checkout@v3
 
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
       - name: Ensure go test files are build annotated
         run: make ensure-test-files-annotated
@@ -60,14 +60,51 @@ jobs:
       - name: Lint
         run: make lint
 
+  check-nuctl-docs:
+    name: Check Nuctl Docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          cache: true
+          go-version-file: go.mod
+
+      - name: Generate Nuctl docs
+        run: make generate-nuctl-docs
+
+      - name: Get Nuctl docs path
+        id: get-nuctl-docs-path
+        run: echo "NUCTL_DOCUMENTATION_PATH=$(make print-nuctl-docs-path | tail -n 1)" >> $GITHUB_ENV
+
+      - name: Check Nuctl docs changes
+        run: |
+          git config --global user.name ${{ env.GITHUB_ACTIONS_BOT_NAME }}
+          git config --global user.email ${{ env.GITHUB_ACTIONS_BOT_EMAIL }}
+          if [[ -n $(git status --porcelain ${{ env.NUCTL_DOCUMENTATION_PATH }}) ]]; then
+            echo "::error::Documentation needs to be regenerated. Please run 'make generate-nuctl-docs' and commit the changes."
+            echo "Differences between current and generated state:"
+            git diff ${{ env.NUCTL_DOCUMENTATION_PATH }}
+            exit 1
+          else
+            echo "No changes in nuctl documentation."
+          fi
+
   check-copyright-license:
     name: Check copyright and license
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
       - name: Check License Lines
-        uses: kt3k/license_checker@v1.0.6
+        run: |
+          deno run --allow-read https://deno.land/x/license_checker@v3.2.3/main.ts
 
       - name: Instructions For Adding Copyright
         if: ${{ failure() }}
@@ -76,7 +113,7 @@ jobs:
           Please add the following lines to the top of your code as a comment:
           
           /*
-            Copyright 2017 The Nuclio Authors.
+            Copyright 2023 The Nuclio Authors.
             
             Licensed under the Apache License, Version 2.0 (the "License");
             you may not use this file except in compliance with the License.
@@ -101,6 +138,7 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
       - name: Run unit test
         run: |
@@ -115,6 +153,7 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
       - name: Build
         run: |
@@ -132,46 +171,29 @@ jobs:
     name: Build docker images
     runs-on: ubuntu-latest
     steps:
-      - name: Dump GitHub context
-        run: echo "$GITHUB_CONTEXT"
-        env:
-          GITHUB_CONTEXT: ${{ toJson(github) }}
-
-      - name: Dump runner context
-        run: echo "$RUNNER_CONTEXT"
-        env:
-          RUNNER_CONTEXT: ${{ toJson(runner) }}
-
-      - name: Dump github ref
-        run: echo "$GITHUB_REF"
-
       - uses: actions/checkout@v3
 
-      # since github-actions gives us 14G only, and fills it up with some garbage
-      # we will free up some space for us (~2GB)
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.CACHE_REPO }}
+          username: ${{ env.CACHE_REPO_NAME }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Freeing up disk space
-        run: |
-          chmod +x "${GITHUB_WORKSPACE}/hack/scripts/ci/free-space.sh"
-          "${GITHUB_WORKSPACE}/hack/scripts/ci/free-space.sh"
+        run: "${GITHUB_WORKSPACE}/hack/scripts/ci/free-space.sh"
 
-      - name: Extract git branch
-        id: git_info
-        run: |
-          echo "name=branch::$(echo ${GITHUB_BASE_REF#refs/heads/})" >> $GITHUB_OUTPUT
-
-      - name: Resolve docker cache tag
-        id: docker_cache
-        run: |
-          export version_suffix=$(echo "${{ steps.git_info.outputs.branch }}" | grep -E "^[0-9]+\.[0-9]+\.x$" | tr -d '.')
-          export unstable_tag=$(if [ -z "$version_suffix" ]; then echo "unstable-cache"; else echo "unstable-cache-$version_suffix";fi)
-          echo "name=tag::$(echo $unstable_tag)" >> $GITHUB_OUTPUT
+      - uses: actions/setup-go@v3
+        with:
+          cache: true
+          go-version-file: go.mod
 
       - name: Build
         run: |
           make docker-images
         env:
           NUCLIO_DOCKER_REPO: ${{ env.REPO }}/${{ env.REPO_NAME }}
-          NUCLIO_CACHE_LABEL: ${{ steps.docker_cache.outputs.tag }}
+          NUCLIO_CACHE_REPO: ${{ env.CACHE_REPO }}/${{ env.CACHE_REPO_NAME }}
 
       # Clean build leftovers
       - name: Post build cleanup
@@ -181,7 +203,7 @@ jobs:
         run: make save-docker-images
 
       - name: Upload
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: nuclio-docker-images
           path: nuclio-docker-images-*.tar.gz
@@ -194,6 +216,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Freeing up disk space
+        run: "${GITHUB_WORKSPACE}/hack/scripts/ci/free-space.sh"
+
       - uses: azure/setup-helm@v3
         with:
           version: "v3.6.3"
@@ -201,11 +226,12 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
-      - uses: manusa/actions-setup-minikube@v2.7.1
+      - uses: manusa/actions-setup-minikube@v2.13.0
         with:
-          minikube version: "v1.26.1"
-          kubernetes version: "v1.23.7"
+          minikube version: "v1.31.2"
+          kubernetes version: "v1.27.5"
           driver: docker
           github token: ${{ github.token }}
           start args: "--addons registry --addons ingress"
@@ -221,7 +247,7 @@ jobs:
           minikube kubectl -- config view --flatten > kubeconfig_flatten
 
       - name: Fetch nuclio docker images
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: nuclio-docker-images
 
@@ -266,6 +292,25 @@ jobs:
           # run test
           make test-k8s-nuctl
 
+      - name: Output some logs in case of failure
+        if: ${{ failure() }}
+        # add set -x to print commands before executing to make logs reading easier
+        run: |
+          set -x
+          minikube ip
+          minikube logs
+          minikube kubectl -- --namespace ${NAMESPACE} logs -l app=nuclio,release=nuclio --tail=-1
+          minikube kubectl -- --namespace ${NAMESPACE} get all
+          minikube kubectl -- --namespace ${NAMESPACE} get all -o yaml
+          minikube kubectl -- --namespace ${NAMESPACE} describe pods
+          minikube kubectl -- --namespace ${NAMESPACE} get cm
+          minikube kubectl -- --namespace ${NAMESPACE} get cm -o yaml
+          minikube kubectl -- --namespace ${NAMESPACE} get secrets
+          minikube kubectl -- --namespace ${NAMESPACE} get secrets -o yaml
+          minikube kubectl -- --namespace ${NAMESPACE} get pvc
+          minikube kubectl -- --namespace ${NAMESPACE} get pv
+          set +x
+
   test_docker_nuctl:
     name: Test Docker nuctl
     runs-on: ubuntu-latest
@@ -277,9 +322,10 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
       - name: Fetch nuclio docker images
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: nuclio-docker-images
 
@@ -293,10 +339,14 @@ jobs:
           make test-docker-nuctl
 
   test_k8s:
-    name: Test Kubernetes
     runs-on: ubuntu-latest
     needs:
       - build_docker_images
+    strategy:
+      fail-fast: false
+      matrix:
+        test-target: [test-functions-k8s-undockerized, test-k8s-undockerized]
+    name: ${{ matrix.test-target == 'test-functions-k8s-undockerized' && 'Test Functions Kubernetes' || 'Test Kubernetes' }}
     steps:
       - uses: actions/checkout@v3
 
@@ -307,11 +357,12 @@ jobs:
       - uses: actions/setup-go@v3
         with:
           cache: true
+          go-version-file: go.mod
 
-      - uses: manusa/actions-setup-minikube@v2.7.1
+      - uses: manusa/actions-setup-minikube@v2.13.0
         with:
-          minikube version: "v1.26.1"
-          kubernetes version: "v1.23.7"
+          minikube version: "v1.31.2"
+          kubernetes version: "v1.27.5"
           driver: docker
           github token: ${{ github.token }}
           start args: "--addons registry --addons ingress"
@@ -327,7 +378,7 @@ jobs:
           minikube kubectl -- config view --flatten > kubeconfig_flatten
 
       - name: Fetch nuclio docker images
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: nuclio-docker-images
 
@@ -338,7 +389,7 @@ jobs:
 
       - name: Export env
         run: |
-          echo "NUCTL_EXTERNAL_IP_ADDRESSES=$(minikube ip)" >> $GITHUB_ENV
+          echo "NUCLIO_EXTERNAL_IP_ADDRESS=$(minikube ip)" >> $GITHUB_ENV
           echo "NUCLIO_TEST_REGISTRY_URL=localhost:5000" >> $GITHUB_ENV
           echo "NUCLIO_TEST_KUBECONFIG=$(pwd)/kubeconfig_flatten" >> $GITHUB_ENV
           echo "NUCLIO_TEST_KUBE_DEFAULT_INGRESS_HOST=nuclio-test-function-host.info" >> $GITHUB_ENV
@@ -351,14 +402,12 @@ jobs:
 
           # install helm chart
           ./test/k8s/ci_assets/install_nuclio_crds.sh
+      - name: Write ingress host to /etc/hosts
+        run: |
+          echo "${NUCLIO_EXTERNAL_IP_ADDRESS} ${NUCLIO_TEST_KUBE_DEFAULT_INGRESS_HOST}" | sudo tee -a /etc/hosts
 
       - name: Run k8s tests
-        run: |
-
-          # write function host to /etc/hosts
-          echo "${NUCTL_EXTERNAL_IP_ADDRESSES} ${NUCLIO_TEST_KUBE_DEFAULT_INGRESS_HOST}" | sudo tee -a /etc/hosts
-
-          make test-k8s
+        run: NUCLIO_K8S_TEST_MAKE_TARGET=${{ matrix.test-target }} make test-k8s
 
   test_python:
     name: Test python

@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,11 +22,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ghodss/yaml"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/zap"
 	"github.com/stretchr/testify/suite"
 	"k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
 
 type ReaderTestSuite struct {
@@ -49,7 +49,7 @@ spec:
   handler: reverser:handler
   triggers:
     http:
-      maxWorkers: 4
+      numWorkers: 4
       kind: http
     franz:
       kind: "kafka"
@@ -93,7 +93,7 @@ metadata:
   name: code_entry_name
   namespace: code_entry_namespace
 spec:
-  runtime: python3.6
+  runtime: python3.9
   handler: code_entry_handler
   targetCpu: 13  # instead of targetCPU to test case insensitivity
 `
@@ -104,7 +104,7 @@ spec:
 			Namespace: "my_namespace",
 		},
 		Spec: Spec{
-			Runtime: "python3.6",
+			Runtime: "python3.9",
 			Handler: "my_handler",
 		},
 	}
@@ -124,7 +124,7 @@ metadata:
   labels:
     label_key: label_val
 spec:
-  runtime: python3.6
+  runtime: python3.9
   handler: code_entry_handler
   targetCpu: 13
   build:
@@ -144,7 +144,7 @@ spec:
 			Labels:    map[string]string{}, // empty map
 		},
 		Spec: Spec{
-			Runtime:   "python3.6",
+			Runtime:   "python3.9",
 			Handler:   "my_handler",
 			Env:       []v1.EnvVar{{Name: "env_var", Value: "my_env_val"}},
 			TargetCPU: 51,
@@ -165,7 +165,7 @@ spec:
 	suite.Require().Equal(expectedEnvVariables, config.Spec.Env, "Bad env vars")
 
 	suite.Require().Equal("my_handler", config.Spec.Handler, "Bad handler")
-	suite.Require().Equal("python3.6", config.Spec.Runtime, "Bad runtime")
+	suite.Require().Equal("python3.9", config.Spec.Runtime, "Bad runtime")
 	suite.Require().Equal([]string{"pip install code_entry_package"}, config.Spec.Build.Commands, "Bad commands")
 	suite.Require().Equal(map[string]string{"label_key": "label_val"}, config.Meta.Labels, "Bad labels")
 	suite.Require().Equal(51, config.Spec.TargetCPU, "Bad target cpu")
@@ -311,6 +311,52 @@ func (suite *ReaderTestSuite) TestCodeEntryConfigTriggerMerge() {
 			}
 		})
 	}
+}
+
+func (suite *ReaderTestSuite) TestBuildFlags() {
+	configData := `
+metadata:
+  name: python handler
+spec:
+  build:
+    flags:
+      - "--insecure-pull"
+      - "--label key=value"
+  runtime: python
+  handler: reverser:handler
+  triggers:
+    http:
+      numWorkers: 4
+      kind: http
+`
+	config := Config{}
+	reader, err := NewReader(suite.logger)
+	suite.Require().NoError(err, "Can't create reader")
+	err = reader.Read(strings.NewReader(configData), "processor", &config)
+	suite.Require().NoError(err, "Can't reader configuration")
+
+	build := config.Spec.Build
+	suite.Require().Equal([]string{"--insecure-pull", "--label key=value"}, build.Flags, "Bad build flags value")
+}
+
+func (suite *ReaderTestSuite) TestEnvFrom() {
+	configData := `
+metadata:
+  name: python handler
+spec:
+  runtime: python
+  handler: reverser:handler
+  envFrom:
+    - secretRef:
+        name: test-secret
+`
+	config := Config{}
+	reader, err := NewReader(suite.logger)
+	suite.Require().NoError(err, "Can't create reader")
+	err = reader.Read(strings.NewReader(configData), "processor", &config)
+	suite.Require().NoError(err, "Can't reader configuration")
+	envFrom := config.Spec.EnvFrom[0]
+	suite.Require().Equal("test-secret", envFrom.SecretRef.Name)
 }
 
 func TestRegistryTestSuite(t *testing.T) {

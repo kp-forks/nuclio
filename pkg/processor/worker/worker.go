@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@ type Worker struct {
 	structuredCloudEvent cloudevent.Structured
 	binaryCloudEvent     cloudevent.Binary
 	eventTime            *time.Time
-	isTerminated         bool
 }
 
 // NewWorker creates a new worker
@@ -90,6 +89,10 @@ func (w *Worker) ProcessEvent(event nuclio.Event, functionLogger logger.Logger) 
 	}
 
 	return response, err
+}
+
+func (w *Worker) ProcessEventBatch(batch []nuclio.Event) ([]*runtime.ResponseWithErrors, error) {
+	return w.runtime.ProcessBatch(batch, w.logger)
 }
 
 // GetStatistics returns a pointer to the statistics object. This must not be modified by the reader
@@ -149,18 +152,35 @@ func (w *Worker) SupportsRestart() bool {
 }
 
 func (w *Worker) Terminate() error {
-	err := w.runtime.Terminate()
-	if err == nil {
-		w.isTerminated = true
+	if err := w.runtime.Terminate(); err != nil {
+		return err
 	}
-	return err
+	w.logger.DebugWith("Successfully terminated worker", "workerIndex", w.index)
+	return nil
 }
 
-func (w *Worker) IsTerminated() bool {
-	return w.isTerminated
+func (w *Worker) Drain() error {
+	if err := w.runtime.Drain(); err != nil {
+		return err
+	}
+	w.logger.DebugWith("Successfully drained worker", "workerIndex", w.index)
+	return nil
+}
+
+func (w *Worker) Continue() error {
+	if err := w.runtime.Continue(); err != nil {
+		return err
+	}
+	w.logger.DebugWith("Successfully continued worker", "workerIndex", w.index)
+	return nil
 }
 
 // Subscribe subscribes to a control message kind
 func (w *Worker) Subscribe(kind controlcommunication.ControlMessageKind, channel chan *controlcommunication.ControlMessage) error {
 	return w.runtime.GetControlMessageBroker().Subscribe(kind, channel)
+}
+
+// Unsubscribe unsubscribes from a control message kind
+func (w *Worker) Unsubscribe(kind controlcommunication.ControlMessageKind, channel chan *controlcommunication.ControlMessage) error {
+	return w.runtime.GetControlMessageBroker().Unsubscribe(kind, channel)
 }

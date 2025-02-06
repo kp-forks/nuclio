@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -154,6 +154,10 @@ spec:
         - name: NUCLIO_DASHBOARD_KANIKO_CACHE_REPO
           value: {{ .Values.dashboard.kaniko.cacheRepo }}
         {{- end }}
+        {{- if .Values.dashboard.kaniko.defaultServiceAccount }}
+        - name: NUCLIO_KANIKO_DEFAULT_SERVICE_ACCOUNT
+          value: {{ .Values.dashboard.kaniko.defaultServiceAccount }}
+        {{- end }}
         {{- if .Values.registry.runRegistryURL }}
         - name: NUCLIO_DASHBOARD_RUN_REGISTRY_URL
           value: {{ .Values.registry.runRegistryURL }}
@@ -187,6 +191,10 @@ spec:
           value: {{ .Values.dashboard.monitorDockerDeamon.maxConsecutiveErrors | quote }}
         - name: NUCLIO_REGISTRY_CREDENTIALS_SECRET_NAME
           value: {{ template "nuclio.registry.credentialsSecretName" . }}
+        {{- if .Values.registry.kind }}
+        - name: NUCLIO_REGISTRY_KIND
+          value: {{ .Values.registry.kind }}
+        {{- end }}
         {{- if .Values.dashboard.kaniko.registryProviderSecretName }}
         - name: NUCLIO_KANIKO_REGISTRY_PROVIDER_AUTH_SECRET_NAME
           value: {{ .Values.dashboard.kaniko.registryProviderSecretName | quote }}
@@ -195,6 +203,8 @@ spec:
           value: {{ template "nuclio.externalIPAddresses" . }}
         - name: NUCLIO_DASHBOARD_IMAGE_NAME_PREFIX_TEMPLATE
           value: {{ .Values.dashboard.imageNamePrefixTemplate | quote }}
+        - name: NUCLIO_DASHBOARD_LOGS_SCREEN_ENABLED
+          value: {{ .Values.dashboard.logsScreenEnabled | quote }}
       {{- if .Values.dashboard.opa.enabled }}
       - name: {{ template "nuclio.name" . }}-{{ .Values.dashboard.opa.name }}
         securityContext:

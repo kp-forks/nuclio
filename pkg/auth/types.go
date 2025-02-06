@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,9 +50,11 @@ func ContextKeyByKind(kind Kind) SessionContextKey {
 type IguazioConfig struct {
 	Timeout                       time.Duration
 	VerificationURL               string
+	VerificationMethod            string
 	VerificationDataEnrichmentURL string
 	CacheSize                     int
 	CacheExpirationTimeout        time.Duration
+	SkipTLSVerification           bool
 }
 
 type Config struct {
@@ -64,11 +66,14 @@ func NewConfig(kind Kind) *Config {
 	config := &Config{
 		Kind: kind,
 	}
+	skipTLSVerification := false
 	if kind == KindIguazio {
+		skipTLSVerification = true
 		config.Iguazio = &IguazioConfig{
 			CacheSize:              100,
 			Timeout:                30 * time.Second,
 			CacheExpirationTimeout: 30 * time.Second,
+			SkipTLSVerification:    skipTLSVerification,
 		}
 	}
 	return config

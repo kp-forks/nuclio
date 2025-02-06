@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -51,15 +52,18 @@ type Store struct {
 	logger       logger.Logger
 	dockerClient dockerclient.Client
 	platform     platform.Platform
+	imageName    string
 }
 
 func NewStore(parentLogger logger.Logger,
 	platform platform.Platform,
-	dockerClient dockerclient.Client) (*Store, error) {
+	dockerClient dockerclient.Client,
+	imageName string) (*Store, error) {
 	return &Store{
 		logger:       parentLogger.GetChild("store"),
 		dockerClient: dockerClient,
 		platform:     platform,
+		imageName:    imageName,
 	}, nil
 }
 
@@ -140,7 +144,7 @@ func (s *Store) GetFunctionEvents(getFunctionEventsOptions *platform.GetFunction
 	var functionEvents []platform.FunctionEvent
 
 	// get function filter
-	functionName := getFunctionEventsOptions.Meta.Labels["nuclio.io/function-name"]
+	functionName := getFunctionEventsOptions.Meta.Labels[common.NuclioResourceLabelKeyFunctionName]
 	functionNames := getFunctionEventsOptions.FunctionNames
 	if len(functionNames) > 0 {
 
@@ -160,7 +164,7 @@ func (s *Store) GetFunctionEvents(getFunctionEventsOptions *platform.GetFunction
 		// the desired filter, skip
 		if functionName != "" &&
 			newFunctionEvent.GetConfig().Meta.Labels != nil &&
-			functionName != newFunctionEvent.GetConfig().Meta.Labels["nuclio.io/function-name"] {
+			functionName != newFunctionEvent.GetConfig().Meta.Labels[common.NuclioResourceLabelKeyFunctionName] {
 			return nil
 		}
 
@@ -265,7 +269,7 @@ func (s *Store) DeleteFunction(ctx context.Context, functionMeta *functionconfig
 		Meta: platform.FunctionEventMeta{
 			Namespace: functionMeta.Namespace,
 			Labels: map[string]string{
-				"nuclio.io/function-name": functionMeta.Name,
+				common.NuclioResourceLabelKeyFunctionName: functionMeta.Name,
 			},
 		},
 	})
@@ -306,7 +310,14 @@ func (s *Store) serializeAndWriteFileContents(resourcePath string, resourceConfi
 }
 
 func (s *Store) getResourcePath(resourceDir string, resourceNamespace string, resourceName string) string {
-	return path.Join(s.getResourceNamespaceDir(resourceDir, resourceNamespace), resourceName+".json")
+	resourcePath := path.Join(s.getResourceNamespaceDir(resourceDir, resourceNamespace), resourceName+".json")
+	// try to check if a function name has a space in it
+	if strings.Contains(resourcePath, " ") {
+		// we can get there only if a function was deployed with a wrong name in Nuclio 1.11.24 and earlier.
+		// if a function name had a space in it, then we created a file called <first_word> instead of the correct name
+		resourcePath = strings.Fields(resourcePath)[0]
+	}
+	return resourcePath
 }
 
 func (s *Store) getResourceNamespaceDir(resourceDir string, resourceNamespace string) string {
@@ -367,19 +378,36 @@ func (s *Store) getResources(resourceDir string,
 func (s *Store) writeFileContents(filePath string, contents []byte) error {
 	s.logger.DebugWith("Writing file contents", "path", filePath, "contents", string(contents))
 
-	// get the file dir
-	fileDir := path.Dir(filePath)
+	tempFile, err := os.CreateTemp(".", "nuclio-contents-temp-file-*")
+	if err != nil {
+		return errors.Wrap(err, "Error creating temporary file")
+	}
 
-	// set NUCLIO_CONTENTS as base64 encoded value
-	env := map[string]string{"NUCLIO_CONTENTS": base64.StdEncoding.EncodeToString(contents)}
+	// remove the temporary file at the end
+	defer os.Remove(tempFile.Name()) // nolint: errcheck
 
-	// generate a command
-	_, _, err := s.runCommand(env,
-		`/bin/sh -c "mkdir -p %s && /bin/printenv NUCLIO_CONTENTS > %s"`,
-		fileDir,
-		filePath)
+	// encode contents to base64 and add a newline at the end
+	// newline at the end is needed to be able to parse files one be one
+	// when doing `cat /functions/*`
+	encodedContents := base64.StdEncoding.EncodeToString(contents) + "\n"
 
-	return err
+	// write content to the temporary file
+	if _, err = tempFile.WriteString(encodedContents); err != nil {
+		tempFile.Close() // nolint: errcheck
+		return errors.Wrap(err, "Failed writing to temporary file")
+	}
+
+	// not using defer to ensure that we have closed the file before copying it
+	if err = tempFile.Close(); err != nil {
+		return errors.Wrap(err, "Failed closing temporary file")
+	}
+
+	// copy temporary file content to container
+	return s.dockerClient.CopyObjectsToContainer(containerName,
+		map[string]string{
+			tempFile.Name(): filePath,
+		})
+
 }
 
 func (s *Store) runCommand(env map[string]string, format string, args ...interface{}) (string, string, error) {
@@ -414,7 +442,7 @@ func (s *Store) runCommand(env map[string]string, format string, args ...interfa
 
 		// run a container that simply volumizes the volume with the storage and sleeps for 6 hours
 		// using alpine mirrored to gcr.io/iguazio for stability
-		if _, err := s.dockerClient.RunContainer("gcr.io/iguazio/alpine:3.15", &dockerclient.RunOptions{
+		if _, err := s.dockerClient.RunContainer(s.imageName, &dockerclient.RunOptions{
 			Volumes:          map[string]string{volumeName: baseDir},
 			Remove:           true,
 			Command:          `/bin/sh -c "/bin/sleep 6h"`,

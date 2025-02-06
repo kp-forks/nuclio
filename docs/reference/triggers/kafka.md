@@ -1,10 +1,12 @@
-# kafka-cluster: Kafka Trigger
+# Kafka trigger
 
-**In This Document**
+## In this document
+
 - [Overview](#overview)
   - [Workers and Worker Allocation modes](#workers)
   - [Multiple topics](#multiple-topics)
 - [Configuration parameters](#config-params)
+  - [Passing configuration via secrets](#configuration-via-secret)
 - [How a message travels through Nuclio to the handler](#message-course)
   - [Configuration parameters](#message-course-config-params)
 - [Offset management](#offset-management)
@@ -24,7 +26,7 @@ In the real world, however, you may want to scale your message processing up and
 
 To this end, Nuclio leverages Kafka consumer groups. When one or more Nuclio replica joins a consumer group, Kafka informs Nuclio which part of the stream it should handle. It does so by using a process known as "rebalancing" to assign each Nuclio replica one or more Kafka partitions to read from and handle; Nuclio's role in the rebalancing process is discussed later in this document (see [Rebalancing](#rebalancing)).
 
-<p align="center"><img src="/docs/assets/images/kafka-high-level.png" alt="Nuclio and Kafka consumer groups illustration" width="400"/></p>
+<p align="center"><img src="../../assets/images/kafka-high-level.png" alt="Nuclio and Kafka consumer groups illustration" width="400"/></p>
 
 When a Nuclio replica is assigned its set of partitions, it can start using Nuclio workers to read from the partitions and handle them. It's currently guaranteed that a given partition is handled only by one replica and that the messages are processed sequentially; that is, a message will only be read and handled after the handling of the previous message in the partition is completed. During rebalancing, however, the responsibility for a partition may be migrated to another Nuclio replica while still preserving the guarantee of sequential processing (in-order-execution).
 
@@ -68,7 +70,7 @@ For example, if your replica has 10 workers and is configured to handle 10 topic
 
 Use the following trigger attributes for basic configurations of your Kafka trigger.
 You can configure each attribute either in the `triggers.<trigger>.attributes.<attribute>` function `spec` element (for example, `triggers.myKafkaTrigger.attributes.sessionTimeout`) or by setting the matching `nuclio.io` annotation key (for example, `nuclio.io/kafka-session-timeout`); (note that not all attributes have matching annotation keys).
-For more information on Nuclio function configuration, see the [function-configuration reference](/docs/reference/function-configuration/function-configuration-reference.md).
+For more information on Nuclio function configuration, see the [function-configuration reference](../../reference/function-configuration/function-configuration-reference.md).
 
 > **Note:** For more advanced configuration parameters, see the configuration sections under [How a message travels through Nuclio to the handler](#message-course-config-params) and [Rebalancing](#rebalancing-config-params). For an example, see [Configuration example](#config-example).
 
@@ -79,10 +81,6 @@ For more information on Nuclio function configuration, see the [function-configu
 - <a id="brokers"></a>**`brokers`** - A list of broker IP addresses.
   <br/>
   **Type:** `[]string`
-
-- <a id="partitions"></a>**`partitions`** - A list of partitions for which the function receives events.
-  <br/>
-  **Type:** `[]int`
 
 - <a id="consumerGroup"></a>**`consumerGroup`** - The name of the Kafka consumer group to use.
   <br/>
@@ -107,7 +105,7 @@ For more information on Nuclio function configuration, see the [function-configu
   - **`handshake`** (`bool`) - Whether to send Kafka SASL handshake first. (default to: `true`)
   - **`user`** (`string`) - Username to be used for authentication.
   - **`password`** (`string`) - Password to be used for authentication.
-  - **`mechanism`** (`string`) - Name of SASL mechanism to use for authentication. (default to: `plain`, see [here](https://github.com/Shopify/sarama/blob/f16c9d8fbe4866c970b20a08be14d57553b0b660/broker.go#L62) for options)
+  - **`mechanism`** (`string`) - Name of SASL mechanism to use for authentication. (default to: `plain`, see [here](https://pkg.go.dev/github.com/Shopify/sarama#SASLMechanism) for options)
     > `GSSAPI` is yet to be supported by Nuclio. (read: Kerberos)
 
   - <a id="sasl.oauth"></a>**`sasl.oauth`** - SASL OAuth configuration object.
@@ -123,6 +121,7 @@ For more information on Nuclio function configuration, see the [function-configu
   **Type:** `object` with the following attributes -
   - **`enable`** (`bool`) - Enable TLS.
   - **`insecureSkipVerify`** (`bool`) - Allow insecure server connections when TLS enabled. (default to: `false`)
+  - **`minimumVersion`** (`string`) - The default minimum TLS version that is acceptable. (default to: `1.2`)
 
 - <a id="cacert"></a>**`caCert`** - The certificate authority (CA) certificate used for TLS authentication.
   <br/>
@@ -162,14 +161,32 @@ For more information on Nuclio function configuration, see the [function-configu
   <br/>
   **Default Value:** `"pool"`
 
+<a id="configuration-via-secret"></a>
+### Passing configuration via secrets
+
+Nuclio allows passing sensitive configuration values (such as Kafka credentials) via secrets.
+To do that, follow the following steps:
+1. Create a secret with the sensitive data (e.g. `access-key`)
+2. Mount the secret as a volume to the function (in `spec.Volumes`)
+3. Specify the path to the mounted values, either in the function's spec or in the function's annotations, with:
+    1. Either specify the full path in the spec/annotation (e.g. `nuclio.io/kafka-access-key = /path/to/secret/access-key`)
+    2. Or, add the secret mount path to the secretPath filed (or the nuclio.io/kafka-secret-path annotation), and the sub paths to the other annotations. Nuclio will resolve the full paths according to the existing annotations.
+e.g:
+```
+nuclio.io/kafka-secret-path = /etc/nuclio/kafka-secret
+nuclio.io/kafka-access-key = accessKey
+```
+
+The current configurations supported via secrets are: `accessKey`, `accessCertificate`, `caCert`, `SASL.OAuth.clientSecret`, `SASL.password`.
+
 <a id="message-course"></a>
 ## How a message travels through Nuclio to the handler
 
-Nuclio leverages the [Sarama](https://pkg.go.dev/github.com/Shopify/sarama?tab=doc) Go client library (`sarama`) to read from Kafka. This library takes care of reading messages from Kafka partitions and distributing them to a consumer - in this case, the Nuclio trigger. A Nuclio replica has exactly one instance of Sarama and one instance of the Nuclio trigger for each Kafka trigger configured for the Nuclio function.
+Nuclio leverages the [Sarama](https://pkg.go.dev/github.com/Shopify/sarama) Go client library (`sarama`) to read from Kafka. This library takes care of reading messages from Kafka partitions and distributing them to a consumer - in this case, the Nuclio trigger. A Nuclio replica has exactly one instance of Sarama and one instance of the Nuclio trigger for each Kafka trigger configured for the Nuclio function.
 
 Upon its creation, the Nuclio trigger configures Sarama to start reading messages from a given broker, topics, or consumer group. At this point, Sarama calculates which partitions the Nuclio replica must handle, communicates the results to the Nuclio trigger, and then starts dispatching messages.
 
-<p align="center"><img src="/docs/assets/images/kafka-message-flow.png" alt="Nuclio Kafka-trigger message flow" width="400"/></p>
+<p align="center"><img src="../../assets/images/kafka-message-flow.png" alt="Nuclio Kafka-trigger message flow" width="400"/></p>
 
 As the first step, Sarama reads a chunk of data from all partitions that are assigned to it, across all topics `(1)`. The amount of data to read per partition is determined in bytes and controlled by the function configuration. Ideally, each read returns data across all partitions, but this is highly dependant on the configuration and the size of messages in the partitions (see the following explanation).
 
@@ -181,7 +198,7 @@ The Nuclio trigger reads directly from this partition consumer queue (remember t
 
 <a id="message-course-config-params"></a>
 ### Configuration parameters
-<!-- See https://pkg.go.dev/github.com/Shopify/sarama?tab=doc /
+<!-- See https://pkg.go.dev/github.com/Shopify/sarama /
   vendor/github.com/Shopify/sarama/config.go, and
   https://kafka.apache.org/documentation/#consumerconfigs + types and default
   values in pkg/processor/trigger/kafka/types.go. -->
@@ -258,9 +275,9 @@ One example are stateful functions that might need to go and consume already bei
 For that, Nuclio offers a way to accept new events without committing them, and explicitly commit offsets of the partition, when the processing is done.
 This enables the function to receive and process more events simultaneously.
 
-To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enabled` or `explicitOnly`, where the optional modes are:
-* `enable` - allows explicit and implicit ack according to the "x-nuclio-stream-no-ack" header
-* `disable`- disables the explicit ack feature and allows only implicit acks (default)
+To enable this feature, set the `ExplicitAckMode` in the trigger's spec to `enable` or `explicitOnly`, where the optional modes are:
+* `enable` - allows explicit and implicit ACK according to the "x-nuclio-stream-no-ack" header
+* `disable`- disables the explicit ACK feature and allows only implicit acks (default)
 * `explicitOnly`- allows only explicit acks and disables implicit acks
 
 To receive more events without committing them, your function handler must respond with a nuclio response object, set the `x-nuclio-stream-no-ack` header to `true` in the request.
@@ -278,26 +295,23 @@ qualified_offset = nuclio.QualifiedOffset.from_event(event)
 await context.platform.explicit_ack(qualified_offset)
 ```
 
-During [rebalance](#rebalancing), the function can still be processing events. We can register a callback to drop or commit events being handled when the rebalancing is about to happen, using the following method:
+### Drain callback
+During [rebalance](#rebalancing), the function can still be processing events. 
+We can register a callback to run before the workers are drained, e.g. to drop or commit events being handled when the rebalancing is about to happen, 
+using the following method (Note that the registered callback is a nullary callback (doesn't accept arguments)):
 ```py
-context.platform.on_signal(callback)
+context.platform.set_drain_callback(callback)
 ```
+
+This feature includes a customizable timeout  `WaitExplicitAckDuringRebalanceTimeout`. Its purpose is to prevent processing the same message twice.
+This timeout allows to configure the waiting time for a control message from runtime after a rebalance happened and before we unsubscribe from control messages from runtime and completely disconnect.
+Default value is `100ms`. It can be also set via function annotation `nuclio.io/wait-explicit-ack-during-rebalance-timeout`.
+
 
 **NOTES**:
-* Currently, the explicit ack feature is only available for python runtime and function that have a Kafka trigger.
+* Currently, the Explicit Ack feature is only available for python runtime and functions that have a stream trigger (kafka/v3io).
 * The explicit ack feature can be enabled only when using a static worker allocation mode. Meaning that the function metadata must have the following annotation: `"nuclio.io/kafka-worker-allocation-mode":"static"`.
 * The `QualifiedOffset` object can be saved in a persistent storage and used to commit the offset on later invocation of the function.
-* The call to the `explicit_ack()` method must be awaited, meaning the handler must be an async function, or provide an event loop to run that method. e.g.:
-```py
-import asyncio
-import nuclio
-
-def handler(context, event):
-  qualified_offset = nuclio.QualifiedOffset.from_event(event)
-  loop = asyncio.get_event_loop()
-  loop.run_until_complete(context.platform.explicit_ack(qualified_offset)
-  return "acked"
-```
 
 <a id="rebalancing"></a>
 ## Rebalancing
@@ -324,7 +338,7 @@ This aggressive termination helps the consumer groups stabilize in a determinist
 
 <a id="rebalancing-config-params"></a>
 ### Configuration parameters
-<!-- See https://pkg.go.dev/github.com/Shopify/sarama?tab=doc /
+<!-- See https://pkg.go.dev/github.com/Shopify/sarama /
   vendor/github.com/Shopify/sarama/config.go, and
   https://kafka.apache.org/documentation/#consumerconfigs + types and default
   values in pkg/processor/trigger/kafka/types.go. -->
@@ -415,5 +429,12 @@ triggers:
       tls:
         enable: true
         insecureSkipVerify: true
+        minVersion: "1.2"
 ```
+
+### Troubleshooting
+
+* Timeout during rebalance
+Issue: `Panic caught while trying to write into channel, which was closed because of wait for rebalance timeout` (log example)
+Solution: This issue can be resolved by increasing the `trigger.<name>.workerTerminationTimeout`. For more details, refer to the [function configuration documentation](../function-configuration/function-configuration-reference).
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/build/runtime"
 
 	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
 	"k8s.io/api/core/v1"
 )
 
@@ -36,6 +37,7 @@ type BuildOptions struct {
 	NoCache                 bool
 	Pull                    bool
 	NoBaseImagePull         bool
+	BuildFlags              map[string]bool
 	BuildArgs               map[string]string
 	RegistryURL             string
 	RepoName                string
@@ -48,8 +50,11 @@ type BuildOptions struct {
 	PriorityClassName       string
 	Tolerations             []v1.Toleration
 	ReadinessTimeoutSeconds int
-	ServiceAccountName      string
+	FunctionServiceAccount  string
+	BuilderServiceAccount   string
 	SecurityContext         *v1.PodSecurityContext
+
+	BuildLogger logger.Logger
 }
 
 type ContainerBuilderConfiguration struct {
@@ -64,6 +69,8 @@ type ContainerBuilderConfiguration struct {
 	DefaultRegistryCredentialsSecretName string
 	DefaultBaseRegistryURL               string
 	DefaultOnbuildRegistryURL            string
+	RegistryKind                         string
+	DefaultServiceAccount                string
 	CacheRepo                            string
 	InsecurePushRegistry                 bool
 	InsecurePullRegistry                 bool
@@ -86,7 +93,7 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 	}
 	if containerBuilderConfiguration.AWSCLIImage == "" {
 		containerBuilderConfiguration.AWSCLIImage = common.GetEnvOrDefaultString("NUCLIO_AWS_CLI_CONTAINER_IMAGE",
-			"amazon/aws-cli:2.7.10")
+			"amazon/aws-cli:2.17.16")
 	}
 	if containerBuilderConfiguration.RegistryProviderSecretName == "" {
 		containerBuilderConfiguration.RegistryProviderSecretName = common.GetEnvOrDefaultString("NUCLIO_KANIKO_REGISTRY_PROVIDER_AUTH_SECRET_NAME",
@@ -94,7 +101,7 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 	}
 	if containerBuilderConfiguration.KanikoImage == "" {
 		containerBuilderConfiguration.KanikoImage = common.GetEnvOrDefaultString("NUCLIO_KANIKO_CONTAINER_IMAGE",
-			"gcr.io/kaniko-project/executor:v1.9.0")
+			"gcr.io/kaniko-project/executor:v1.23.2")
 	}
 	if containerBuilderConfiguration.KanikoImagePullPolicy == "" {
 		containerBuilderConfiguration.KanikoImagePullPolicy = common.GetEnvOrDefaultString(
@@ -112,6 +119,9 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 
 	containerBuilderConfiguration.DefaultRegistryCredentialsSecretName =
 		common.GetEnvOrDefaultString("NUCLIO_REGISTRY_CREDENTIALS_SECRET_NAME", "")
+
+	containerBuilderConfiguration.RegistryKind =
+		common.GetEnvOrDefaultString("NUCLIO_REGISTRY_KIND", "")
 
 	if containerBuilderConfiguration.DefaultBaseRegistryURL == "" {
 		containerBuilderConfiguration.DefaultBaseRegistryURL =
@@ -143,6 +153,9 @@ func NewContainerBuilderConfiguration() (*ContainerBuilderConfiguration, error) 
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to parse job deletion timeout duration")
 	}
+
+	containerBuilderConfiguration.DefaultServiceAccount = common.GetEnvOrDefaultString("NUCLIO_KANIKO_DEFAULT_SERVICE_ACCOUNT",
+		"")
 
 	return &containerBuilderConfiguration, nil
 }

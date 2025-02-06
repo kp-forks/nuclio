@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,13 +49,16 @@ type Client struct {
 }
 
 func NewClient(parentLogger logger.Logger, platformConfiguration *platformconfig.Config) (*Client, error) {
+	// skip TLS verification for iguazio
+	skipTLSVerification := platformConfiguration.ProjectsLeader.Kind == platformconfig.ProjectsLeaderKindIguazio
+
 	newClient := Client{
 		logger:                parentLogger.GetChild("leader-client-iguazio"),
 		platformConfiguration: platformConfiguration,
 		httpClient: &http.Client{
 			Timeout: DefaultRequestTimeout,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLSVerification},
 			},
 		},
 	}
@@ -139,7 +142,7 @@ func (c *Client) Create(ctx context.Context, createProjectOptions *platform.Crea
 
 	// send the request
 	c.logger.DebugWithCtx(ctx,
-		"Creating project",
+		"Creating project request to leader",
 		"body", string(body))
 	responseBody, response, err := common.SendHTTPRequestWithContext(ctx,
 		c.httpClient,
@@ -223,7 +226,8 @@ func (c *Client) Create(ctx context.Context, createProjectOptions *platform.Crea
 func (c *Client) Update(ctx context.Context, updateProjectOptions *platform.UpdateProjectOptions) error {
 	var cookies []*http.Cookie
 
-	c.logger.DebugWithCtx(ctx, "Sending update project request to leader",
+	c.logger.DebugWithCtx(ctx,
+		"Sending update project request to leader",
 		"name", updateProjectOptions.ProjectConfig.Meta.Name,
 		"namespace", updateProjectOptions.ProjectConfig.Meta.Namespace)
 
@@ -381,7 +385,6 @@ func (c *Client) generateCommonRequestHeaders() map[string]string {
 func (c *Client) generateProjectRequestBody(projectConfig *platform.ProjectConfig) ([]byte, error) {
 	project := NewProjectFromProjectConfig(projectConfig)
 	c.enrichProjectWithNuclioFields(&project)
-
 	return json.Marshal(project)
 }
 
@@ -488,7 +491,11 @@ func (c *Client) resolveGetProjectResponse(detail bool, body []byte) ([]platform
 func (c *Client) logLeaderInternalServerResponseError(ctx context.Context,
 	response *http.Response,
 	errMessage string) {
-	if response.StatusCode >= 500 {
+	if response == nil {
+		c.logger.WarnWithCtx(ctx, "Failed to get response", "errMessage", errMessage)
+		return
+	}
+	if response != nil && response.StatusCode >= 500 {
 		c.logger.WarnWithCtx(ctx,
 			errMessage,
 			"statusCode", response.StatusCode,

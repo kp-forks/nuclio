@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/build/runtimeconfig"
 
@@ -543,7 +544,7 @@ functionAugmentedConfigs:
 			// all function matches `nuclio.io/class: function` should have deployment spec of MinReadySeconds: 90
 			v1.LabelSelector{
 				MatchLabels: map[string]string{
-					"nuclio.io/class": "function",
+					common.NuclioLabelKeyClass: "function",
 				},
 			},
 			functionconfig.Config{},
@@ -595,7 +596,7 @@ func (suite *PlatformConfigTestSuite) TestEnrichContainerResources() {
 
 	resources := corev1.ResourceRequirements{}
 
-	platformConfig.EnrichContainerResources(suite.ctx, suite.logger, &resources)
+	platformConfig.EnrichFunctionContainerResources(suite.ctx, suite.logger, &resources)
 
 	suite.Require().Equal(expectedResources["requestsCPU"], resources.Requests["cpu"])
 	suite.Require().Equal(expectedResources["requestsMemory"], resources.Requests["memory"])
@@ -613,7 +614,7 @@ func (suite *PlatformConfigTestSuite) TestEnrichContainerResourcesWithoutDefault
 
 	resources := corev1.ResourceRequirements{}
 
-	platformConfig.EnrichContainerResources(suite.ctx, suite.logger, &resources)
+	platformConfig.EnrichFunctionContainerResources(suite.ctx, suite.logger, &resources)
 
 	suite.Require().Equal(expectedRequestsCPU, resources.Requests["cpu"])
 	suite.Require().Equal(expectedRequestsMemory, resources.Requests["memory"])
@@ -657,7 +658,7 @@ func (suite *PlatformConfigTestSuite) TestEnrichContainerResourcesPartialEnrichm
 		},
 	}
 
-	platformConfig.EnrichContainerResources(suite.ctx, suite.logger, &resources)
+	platformConfig.EnrichFunctionContainerResources(suite.ctx, suite.logger, &resources)
 
 	suite.Require().Equal(expectedResources["requestsCPU"], resources.Requests["cpu"])
 	suite.Require().Equal(expectedResources["requestsMemory"], resources.Requests["memory"])
@@ -687,7 +688,7 @@ func (suite *PlatformConfigTestSuite) TestEnrichContainerResourcesPartialDefault
 
 	resources := corev1.ResourceRequirements{}
 
-	platformConfig.EnrichContainerResources(suite.ctx, suite.logger, &resources)
+	platformConfig.EnrichFunctionContainerResources(suite.ctx, suite.logger, &resources)
 
 	suite.Require().Equal(expectedRequestsCPU, resources.Requests["cpu"])
 	suite.Require().Equal(expectedRequestsMemory, resources.Requests["memory"])
@@ -695,6 +696,6 @@ func (suite *PlatformConfigTestSuite) TestEnrichContainerResourcesPartialDefault
 	suite.Require().Empty(resources.Limits["memory"])
 }
 
-func TestRegistryTestSuite(t *testing.T) {
+func TestPlatformConfigTestSuite(t *testing.T) {
 	suite.Run(t, new(PlatformConfigTestSuite))
 }

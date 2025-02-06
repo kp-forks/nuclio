@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform"
 
@@ -121,6 +122,12 @@ func (nf *NuclioFunction) GetComputedMaxReplicas() int32 {
 
 	// If neither Replicas nor MaxReplicas nor MinReplicas is given, default to 1
 	return 1
+}
+
+// EnrichNodeSelector enriches Spec.NodeSelector with platform and project NodeSelectors,
+// where function values take precedence over project values, and project values take precedence over platform values
+func (nf *NuclioFunction) EnrichNodeSelector(platformNodeSelector, projectNodeSelector map[string]string) {
+	nf.Status.EnrichedNodeSelector = common.MergeNodeSelector(nf.Spec.NodeSelector, projectNodeSelector, platformNodeSelector)
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

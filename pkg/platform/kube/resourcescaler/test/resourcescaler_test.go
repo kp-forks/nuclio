@@ -1,7 +1,7 @@
 //go:build test_integration && test_kube
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,11 +26,12 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/common/testutils"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform"
 	"github.com/nuclio/nuclio/pkg/platform/kube/resourcescaler"
-	"github.com/nuclio/nuclio/pkg/platform/kube/test"
+	kubesuite "github.com/nuclio/nuclio/pkg/platform/kube/test/suite"
 	httptrigger "github.com/nuclio/nuclio/pkg/processor/trigger/http"
 
 	"github.com/stretchr/testify/suite"
@@ -48,7 +49,7 @@ import (
 )
 
 type ResourceScalerTestSuite struct {
-	test.KubeTestSuite
+	kubesuite.KubeTestSuite
 	dlx            *dlx.DLX
 	autoscaler     *autoscaler.Autoscaler
 	metricClient   *fake.FakeCustomMetricsClient
@@ -195,7 +196,7 @@ func (suite *ResourceScalerTestSuite) TestSanity() {
 
 		// try invoke function without the target header
 		// expect DLX to fail on 400
-		_, _, _ = common.SendHTTPRequest(nil,
+		_, _, _ = common.SendHTTPRequest(suite.dlxHTTPClient,
 			http.MethodGet,
 			fmt.Sprintf("http://%s:8080", suite.GetTestHost()),
 			[]byte{},
@@ -210,12 +211,12 @@ func (suite *ResourceScalerTestSuite) TestSanity() {
 		// it fails to resolve the internal (kubernetes) function host
 		// Background: make DLX work in "test" mode, where it invoke the function from within the k8s cluster
 		//       see suite.KubectlInvokeFunctionViaCurl(functionName, "http://function-service-endpoint:8080")
-		responseBody, _, err := common.SendHTTPRequest(nil,
+		responseBody, _, err := common.SendHTTPRequest(suite.dlxHTTPClient,
 			http.MethodGet,
 			fmt.Sprintf("http://%s:8080", suite.GetTestHost()),
 			[]byte{},
 			map[string]string{
-				"X-Nuclio-Target": functionName,
+				headers.TargetName: functionName,
 			},
 			nil,
 			0)
@@ -320,12 +321,12 @@ func (suite *ResourceScalerTestSuite) TestMultiTargetScaleFromZero() {
 				// it fails to resolve the internal (kubernetes) function host
 				// Background: make DLX work in "test" mode, where it invoke the function from within the k8s cluster
 				//       see suite.KubectlInvokeFunctionViaCurl(functionName, "http://function-service-endpoint:8080")
-				responseBody, _, err := common.SendHTTPRequest(nil,
+				responseBody, _, err := common.SendHTTPRequest(suite.dlxHTTPClient,
 					http.MethodGet,
 					fmt.Sprintf("http://%s:8080", suite.GetTestHost()),
 					[]byte{},
 					map[string]string{
-						"X-Nuclio-Target": fmt.Sprintf("%s,%s", functionName1, functionName2),
+						headers.TargetName: fmt.Sprintf("%s,%s", functionName1, functionName2),
 					},
 					nil,
 					0)

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package v3iostream
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -50,8 +51,8 @@ type Configuration struct {
 	SequenceNumberShardWaitInterval string
 	RecordBatchSizeChan             int
 	AckWindowSize                   uint64
-
-	seekTo v3io.SeekShardInputType
+	LogLevel                        int
+	seekTo                          v3io.SeekShardInputType
 
 	// backwards compatibility
 	PollingIntervalMs int
@@ -63,28 +64,32 @@ func NewConfiguration(id string, triggerConfiguration *functionconfig.Trigger,
 	newConfiguration := Configuration{}
 
 	// create base
-	newConfiguration.Configuration = *trigger.NewConfiguration(id, triggerConfiguration, runtimeConfiguration)
+	baseConfiguration, err := trigger.NewConfiguration(id, triggerConfiguration, runtimeConfiguration)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to create trigger configuration")
+	}
+	newConfiguration.Configuration = *baseConfiguration
 
 	workerAllocationModeValue := ""
+	explicitAckModeValue := ""
 
 	if err := newConfiguration.PopulateConfigurationFromAnnotations([]trigger.AnnotationConfigField{
 		{Key: "custom.nuclio.io/v3iostream-window-size", ValueUInt64: &newConfiguration.AckWindowSize},
 		{Key: "nuclio.io/v3iostream-worker-allocation-mode", ValueString: &workerAllocationModeValue},
+
+		{Key: "nuclio.io/v3iostream-log-level", ValueInt: &newConfiguration.LogLevel},
+
+		// allow changing explicit ack mode via annotation
+		{Key: "nuclio.io/v3iostream-explicit-ack-mode", ValueString: &explicitAckModeValue},
 	}); err != nil {
 		return nil, errors.Wrap(err, "Failed to populate configuration from annotations")
 	}
 
-	newConfiguration.WorkerAllocationMode = partitionworker.AllocationMode(workerAllocationModeValue)
-
-	// default explicit ack mode to 'disable'
-	if triggerConfiguration.ExplicitAckMode == "" {
-		newConfiguration.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
-	}
-
-	// explicit ack is only allowed for Static Allocation mode
-	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
-		functionconfig.ExplicitAckEnabled(triggerConfiguration.ExplicitAckMode) {
-		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
+	if err := newConfiguration.PopulateExplicitAckMode(
+		logger,
+		explicitAckModeValue,
+		triggerConfiguration.ExplicitAckMode); err != nil {
+		return nil, errors.Wrap(err, "Failed to populate explicit ack mode")
 	}
 
 	// parse attributes
@@ -113,11 +118,16 @@ func NewConfiguration(id string, triggerConfiguration *functionconfig.Trigger,
 		newConfiguration.SeekTo = "latest"
 	}
 
-	if newConfiguration.WorkerAllocationMode == "" {
-		newConfiguration.WorkerAllocationMode = partitionworker.AllocationModePool
+	newConfiguration.WorkerAllocationMode = newConfiguration.ResolveWorkerAllocationMode(newConfiguration.WorkerAllocationMode,
+		partitionworker.AllocationMode(workerAllocationModeValue))
+
+	// explicit ack is only allowed for Static Allocation mode
+	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
+		functionconfig.ExplicitAckEnabled(newConfiguration.ExplicitAckMode) {
+		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
 	}
 
-	// for backwards compatibility, allow populating container name, streampath and consumer group
+	// for backwards compatibility, allow populating container name, stream path and consumer group
 	// name from url
 	if newConfiguration.ContainerName == "" &&
 		newConfiguration.StreamPath == "" &&
@@ -127,11 +137,18 @@ func NewConfiguration(id string, triggerConfiguration *functionconfig.Trigger,
 		}
 	}
 
-	// if the password is a uuid - assume it is an access key and clear out the username/pass
+	// if the password is an uuid - assume it is an access key and clear out the username/pass
 	if _, err := uuid.Parse(newConfiguration.Password); err == nil {
 		newConfiguration.Secret = newConfiguration.Password
 		newConfiguration.Username = ""
 		newConfiguration.Password = ""
+	} else if newConfiguration.Password == "$generate" {
+		// enrich the secret from the access key in the env var
+		if accessKeyEnvVar := os.Getenv("V3IO_ACCESS_KEY"); accessKeyEnvVar != "" {
+			newConfiguration.Secret = accessKeyEnvVar
+			newConfiguration.Username = ""
+			newConfiguration.Password = ""
+		}
 	}
 
 	return &newConfiguration, nil

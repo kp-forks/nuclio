@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,13 +35,14 @@ import (
 	"github.com/nuclio/nuclio/pkg/platform/factory"
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 	"github.com/nuclio/nuclio/pkg/restful"
-	// load all sinks
-	_ "github.com/nuclio/nuclio/pkg/sinks"
 
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/v3io/version-go"
 	"k8s.io/client-go/rest"
+
+	// load all sinks
+	_ "github.com/nuclio/nuclio/pkg/sinks"
 )
 
 func Run(listenAddress string,
@@ -73,7 +74,8 @@ func Run(listenAddress string,
 	authConfigIguazioVerificationURL string,
 	authConfigIguazioVerificationDataEnrichmentURL string,
 	authConfigIguazioCacheSize string,
-	authConfigIguazioCacheExpirationTimeout string) error {
+	authConfigIguazioCacheExpirationTimeout string,
+	authConfigIguazioVerificationMethod string) error {
 
 	// get platform configuration
 	platformConfiguration, err := platformconfig.NewPlatformConfig(platformConfigurationPath)
@@ -112,7 +114,8 @@ func Run(listenAddress string,
 			authConfigIguazioVerificationDataEnrichmentURL,
 			authConfigIguazioCacheSize,
 			authConfigIguazioCacheExpirationTimeout,
-			authConfigIguazioTimeout); err != nil {
+			authConfigIguazioTimeout,
+			authConfigIguazioVerificationMethod); err != nil {
 			return errors.Wrap(err, "Failed to enrich auth config")
 		}
 	}
@@ -195,18 +198,23 @@ func enrichAuthConfig(authConfig *auth.Config,
 	authConfigIguazioVerificationDataEnrichmentURL string,
 	authConfigIguazioCacheSize string,
 	authConfigIguazioCacheExpirationTimeout string,
-	authConfigIguazioTimeout string) error {
+	authConfigIguazioTimeout string,
+	authConfigIguazioVerificationMethod string) error {
 	var err error
 
 	if authConfigIguazioVerificationURL != "" {
 		authConfig.Iguazio.VerificationURL = authConfigIguazioVerificationURL
 	}
 
+	if authConfigIguazioVerificationMethod != "" {
+		authConfig.Iguazio.VerificationMethod = authConfigIguazioVerificationMethod
+	}
+
 	if authConfigIguazioVerificationDataEnrichmentURL != "" {
 		authConfig.Iguazio.VerificationDataEnrichmentURL = authConfigIguazioVerificationDataEnrichmentURL
 	} else {
 		authConfig.Iguazio.VerificationDataEnrichmentURL =
-			authConfigIguazioVerificationURL + iguazio.IguzioVerificationAndDataEnrichmentURLSuffix
+			authConfigIguazioVerificationURL + iguazio.IguazioVerificationAndDataEnrichmentURLSuffix
 	}
 
 	if authConfigIguazioTimeout != "" {

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,12 +16,15 @@ limitations under the License.
 
 package status
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Provider is an interface for entities that have a reportable status
 type Provider interface {
 
-	// Returns the entity's status
+	// GetStatus Returns the entity's status
 	GetStatus() Status
 }
 
@@ -58,4 +61,31 @@ func (s Status) OneOf(statuses ...Status) bool {
 		}
 	}
 	return false
+}
+
+type SafeStatus struct {
+	status      Status
+	statusMutex sync.RWMutex
+}
+
+func NewSafeStatus(status Status) *SafeStatus {
+	return &SafeStatus{status: status, statusMutex: sync.RWMutex{}}
+}
+
+func (as *SafeStatus) SetStatus(status Status) {
+	as.statusMutex.Lock()
+	defer as.statusMutex.Unlock()
+
+	as.status = status
+}
+
+func (as *SafeStatus) GetStatus() Status {
+	as.statusMutex.RLock()
+	defer as.statusMutex.RUnlock()
+
+	return as.status
+}
+
+func (as *SafeStatus) String() string {
+	return as.GetStatus().String()
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nuclio/nuclio/pkg/common"
@@ -94,7 +95,7 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 			var err error
 
 			// initialize root
-			if err := rootCommandeer.initialize(); err != nil {
+			if err := rootCommandeer.initialize(true); err != nil {
 				return errors.Wrap(err, "Failed to initialize root")
 			}
 
@@ -113,6 +114,8 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 					commandeer.functionConfig = commandeer.prepareFunctionConfigForRedeploy(importedFunction)
 				}
 			}
+
+			commandeer.functionConfigPath = commandeer.resolveFunctionConfigPath()
 
 			// If config file is provided
 			if importedFunction == nil && commandeer.functionConfigPath != "" {
@@ -147,20 +150,15 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 			// Populate HTTP Service type
 			commandeer.populateHTTPServiceType()
 
-			// Override basic fields from the config
-			commandeer.functionConfig.Meta.Name = commandeer.functionName
-			commandeer.functionConfig.Meta.Namespace = rootCommandeer.namespace
-
-			commandeer.functionConfig.Spec.Build = commandeer.functionBuild
-			commandeer.functionConfig.Spec.Build.Commands = commandeer.commands
-			commandeer.functionConfig.Spec.Build.FunctionConfigPath = commandeer.functionConfigPath
-
 			// Enrich function config with args
+			if err := commandeer.enrichConfigMetadata(rootCommandeer); err != nil {
+				return errors.Wrap(err, "Failed overriding basic config fields")
+			}
 			commandeer.enrichConfigWithStringArgs()
 			commandeer.enrichConfigWithIntArgs()
 			commandeer.enrichConfigWithBoolArgs()
-			err = commandeer.enrichConfigWithComplexArgs()
-			if err != nil {
+			commandeer.enrichBuildConfigWithArgs()
+			if err = commandeer.enrichConfigWithComplexArgs(); err != nil {
 				return errors.Wrap(err, "Failed config with complex args")
 			}
 
@@ -189,7 +187,6 @@ func newDeployCommandeer(ctx context.Context, rootCommandeer *RootCommandeer) *d
 	}
 
 	addDeployFlags(cmd, commandeer)
-	cmd.Flags().StringVarP(&commandeer.inputImageFile, "input-image-file", "", "", "Path to an input function-image Docker archive file")
 
 	commandeer.cmd = cmd
 
@@ -230,8 +227,8 @@ func addDeployFlags(cmd *cobra.Command,
 	cmd.Flags().Var(&commandeer.resourceLimits, "resource-limit", "Resource restrictions of the format '<resource name>=<quantity>' (for example, 'cpu=3')")
 	cmd.Flags().Var(&commandeer.resourceRequests, "resource-request", "Requested resources of the format '<resource name>=<quantity>' (for example, 'cpu=3')")
 	cmd.Flags().StringVar(&commandeer.loggerLevel, "logger-level", "", "One of debug, info, warn, error. By default, uses platform configuration")
+	cmd.Flags().StringVarP(&commandeer.inputImageFile, "input-image-file", "", "", "Path to an input function-image Docker archive file")
 }
-
 func parseResourceAllocations(values stringSliceFlag, resources *v1.ResourceList) error {
 	for _, value := range values {
 
@@ -369,6 +366,25 @@ func (d *deployCommandeer) populateHTTPServiceType() {
 	if overridingHTTPServiceType != "" {
 		d.rootCommandeer.platformConfiguration.Kube.DefaultServiceType = overridingHTTPServiceType
 	}
+}
+
+// enrichConfigMetadata overrides metadata fields in the function config with the values from the commandeer,
+// if they are given explicitly
+func (d *deployCommandeer) enrichConfigMetadata(rootCommandeer *RootCommandeer) error {
+
+	functionName, err := d.resolveFunctionName()
+	if err != nil {
+		return errors.Wrap(err, "Failed to resolve function name")
+	}
+
+	// set the resolved function name
+	d.functionConfig.Meta.Name = functionName
+	d.functionName = functionName
+
+	// override the namespace in the config with the namespace from the command line (must be set)
+	d.functionConfig.Meta.Namespace = rootCommandeer.namespace
+
+	return nil
 }
 
 func (d *deployCommandeer) enrichConfigWithStringArgs() {
@@ -589,4 +605,104 @@ func (d *deployCommandeer) enrichConfigWithComplexArgs() error {
 	}
 
 	return nil
+}
+
+func (d *deployCommandeer) enrichBuildConfigWithArgs() {
+
+	// enrich string fields in function config with flags
+	common.PopulateFieldsFromValues(map[*string]string{
+		&d.functionConfig.Spec.Build.FunctionConfigPath: d.functionConfigPath,
+		&d.functionConfig.Spec.Build.Path:               d.functionBuild.Path,
+		&d.functionConfig.Spec.Build.FunctionSourceCode: d.functionBuild.FunctionSourceCode,
+		&d.functionConfig.Spec.Build.Image:              d.functionBuild.Image,
+		&d.functionConfig.Spec.Build.Registry:           d.functionBuild.Registry,
+		&d.functionConfig.Spec.Build.BaseImage:          d.functionBuild.BaseImage,
+		&d.functionConfig.Spec.Build.OnbuildImage:       d.functionBuild.OnbuildImage,
+		&d.functionConfig.Spec.Build.CodeEntryType:      d.functionBuild.CodeEntryType,
+	})
+
+	// enrich bool fields in function config with flags
+	common.PopulateFieldsFromValues(map[*bool]bool{
+		&d.functionConfig.Spec.Build.NoBaseImagesPull: d.functionBuild.NoBaseImagesPull,
+		&d.functionConfig.Spec.Build.NoCleanup:        d.functionBuild.NoCleanup,
+		&d.functionConfig.Spec.Build.Offline:          d.functionBuild.Offline,
+	})
+
+	// enrich build commands
+	if len(d.commands) > 0 {
+		d.functionConfig.Spec.Build.Commands = d.commands
+	}
+}
+
+func (d *deployCommandeer) resolveFunctionName() (string, error) {
+	if d.functionName != "" {
+		return d.functionName, nil
+	}
+
+	// if function name is not provided, use the name from the config
+	if d.functionConfig.Meta.Name != "" {
+		return d.functionConfig.Meta.Name, nil
+	}
+
+	// if a path is provided, read the function config from the path and use the name from the config
+	if d.functionBuild.Path != "" {
+		functionName, err := d.resolveFunctionNameFromPath()
+		if err != nil {
+			return "", errors.Wrap(err, "Failed to resolve function name from path")
+		}
+		return functionName, nil
+	}
+
+	return "", errors.New("Function name is not provided")
+}
+
+func (d *deployCommandeer) resolveFunctionNameFromPath() (string, error) {
+
+	functionConfigPath := d.resolveFunctionConfigPath()
+	if functionConfigPath == "" {
+		return "", errors.New("Failed to resolve function config path")
+	}
+
+	config := &functionconfig.Config{}
+
+	functionconfigReader, err := functionconfig.NewReader(d.rootCommandeer.loggerInstance)
+	if err != nil {
+		return "", errors.Wrap(err, "Failed to create functionconfig reader")
+	}
+	if err := functionconfigReader.ReadFunctionConfigFile(functionConfigPath, config); err != nil {
+		return "", errors.Wrap(err, "Failed to read function configuration")
+	}
+
+	return config.Meta.Name, nil
+}
+
+func (d *deployCommandeer) resolveFunctionConfigPath() string {
+
+	if d.functionConfigPath != "" {
+		return d.functionConfigPath
+	}
+
+	// if the user provided a configuration path, use that
+	if d.functionBuild.FunctionConfigPath != "" {
+		return d.functionBuild.FunctionConfigPath
+	}
+
+	// if the path is a file, check if it is a yaml file
+	if common.IsFile(d.functionBuild.Path) {
+		cleanPath := filepath.Clean(d.functionBuild.Path)
+		if filepath.Ext(cleanPath) == ".yaml" || filepath.Ext(cleanPath) == ".yml" {
+			return cleanPath
+		}
+
+		// it's a file, but not a config file
+		return ""
+	}
+
+	functionConfigPath := filepath.Join(d.functionBuild.Path, common.FunctionConfigFileName)
+
+	if !common.FileExists(functionConfigPath) {
+		return ""
+	}
+
+	return functionConfigPath
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/nuclio/nuclio/pkg/auth"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 )
 
 type Client interface {
@@ -44,8 +45,8 @@ func GetUserAndGroupIdsFromAuthSession(session auth.Session) []string {
 func GetUserAndGroupIdsFromHeaders(request *http.Request) []string {
 	var ids []string
 
-	userID := request.Header.Get(UserIDHeader)
-	userGroupIdsStr := request.Header.Get(UserGroupIdsHeader)
+	userID := request.Header.Get(headers.UserID)
+	userGroupIdsStr := request.Header.Get(headers.UserGroupIds)
 
 	if userID != "" {
 		ids = append(ids, userID)
@@ -64,6 +65,10 @@ func GenerateProjectResourceString(projectName string) string {
 
 func GenerateFunctionResourceString(projectName, functionName string) string {
 	return fmt.Sprintf("/projects/%s/functions/%s", projectName, functionName)
+}
+
+func GenerateFunctionRedeployResourceString(projectName, functionName string) string {
+	return fmt.Sprintf("/projects/%s/functions/%s/redeploy", projectName, functionName)
 }
 
 func GenerateFunctionEventResourceString(projectName, functionName, functionEventName string) string {

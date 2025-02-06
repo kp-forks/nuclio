@@ -1,4 +1,4 @@
-# Getting Started with Nuclio on Kubernetes
+# Installing Nuclio on Kubernetes
 
 Follow this step-by-step guide to set up a Nuclio development environment that uses a Kubernetes cluster.
 
@@ -6,7 +6,7 @@ Follow this step-by-step guide to set up a Nuclio development environment that u
 
 - [Prerequisites](#prerequisites)
 - [Install Nuclio](#install-nuclio)
-- [What's next](#whats-next)
+- [What's next](#what-s-next)
 
 ## Prerequisites
 
@@ -16,14 +16,15 @@ Before starting the set-up procedure, ensure that the following prerequisites ar
 
 - You have the credentials of a Docker registry, such as [Docker Hub](https://hub.docker.com/), [Azure Container Registry (ACR)](https://azure.microsoft.com/services/container-registry/), or [Google Container Registry (GCR)](https://cloud.google.com/container-registry/).
 
-- The [Nuclio CLI](/docs/reference/nuctl/nuctl.md) (`nuctl`) is installed &mdash; if you wish to [use the CLI to deploy Nuclio functions](#deploy-a-function-with-the-nuclio-cli).
+- The [Nuclio CLI](../../reference/nuctl/nuctl.md) (`nuctl`) is installed &mdash; if you wish to [use the CLI to deploy Nuclio functions](#deploy-a-function-with-the-nuclio-cli).
     To install the CLI, simply [download](https://github.com/nuclio/nuclio/releases) the appropriate CLI version to your installation machine.
 
 ## Install Nuclio
 
-At this stage you should have a functioning Kubernetes cluster, credentials to a private Docker registry, and a working Kubernetes CLI (`kubectl`), and you can proceed to install the Nuclio services on the cluster (i.e., deploy Nuclio). For more information about `kubectl`, see the [Kubernetes documentation](https://kubernetes.io/docs/user-guide/kubectl-overview/).
+At this stage you should have a functioning Kubernetes cluster, credentials to a private Docker registry, and a working Kubernetes CLI (`kubectl`), and you can proceed to install the Nuclio services on the cluster (i.e., deploy Nuclio). For more information about `kubectl`, see the [Kubernetes documentation](https://kubernetes.io/docs/reference/kubectl/).
 
-Follow the instructions of [How to run nuclio in Production](/docs/setup/k8s/running-in-production-k8s.md#the-preferred-deployment-method)
+Follow the instructions of [How to run nuclio in Production](running-in-production-k8s.md)
+
 
 Use the command `kubectl --namespace nuclio get pods` to verify both the controller and dashboard are running.
 
@@ -31,8 +32,8 @@ Use the command `kubectl --namespace nuclio get pods` to verify both the control
 
 See the following resources to make the best of your new Nuclio environment:
 
-- [Deploying Functions](/docs/tasks/deploying-functions.md)
-- [Invoking Functions by Name with a Kubernetes Ingress](/docs/concepts/k8s/function-ingress.md)
-- [More function examples](/hack/examples/README.md)
-- [References](/docs/reference)
-- [Best Practices and Common Pitfalls](/docs/concepts/best-practices-and-common-pitfalls.md)
+- [Deploying Functions](../../tasks/deploying-functions.md)
+- [Invoking Functions by Name with a Kubernetes Ingress](../../concepts/k8s/function-ingress.md)
+- [More function examples](../../examples/README.md)
+- [References](../../reference/index)
+- [Best Practices and Common Pitfalls](../../concepts/best-practices-and-common-pitfalls.md)

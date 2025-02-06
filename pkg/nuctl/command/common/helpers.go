@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,12 +17,18 @@ limitations under the License.
 package common
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 
-	"github.com/ghodss/yaml"
+	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/functionconfig"
+
 	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
+	"sigs.k8s.io/yaml"
 )
 
 func ReadFromInOrStdin(r io.Reader) ([]byte, error) {
@@ -71,8 +77,61 @@ func GetUnmarshalFunc(bytes []byte) (func(data []byte, v interface{}) error, err
 	}
 
 	if err = yaml.Unmarshal(bytes, &obj); err == nil {
-		return yaml.Unmarshal, nil
+		return func(data []byte, v interface{}) error {
+			return yaml.Unmarshal(data, v)
+		}, nil
 	}
 
 	return nil, errors.New("Input is neither json nor yaml")
+}
+
+// ConvertMapToFunctionConfigWithStatus converts a map to a function config with status
+func ConvertMapToFunctionConfigWithStatus(functionMap map[string]interface{}) (*functionconfig.ConfigWithStatus, error) {
+	var functionConfigWithStatus *functionconfig.ConfigWithStatus
+
+	// convert to json
+	functionConfigJSON, err := json.Marshal(functionMap)
+	if err != nil {
+		return functionConfigWithStatus, errors.Wrap(err, "Failed to marshal function config")
+	}
+
+	// convert to function config with status
+	if err := json.Unmarshal(functionConfigJSON, &functionConfigWithStatus); err != nil {
+		return functionConfigWithStatus, errors.Wrap(err, "Failed to unmarshal function config")
+	}
+
+	return functionConfigWithStatus, nil
+}
+
+// saveReportToFile saves the report to the file
+// It does not return any errors if they occur; instead, it logs an error for the best effort
+func saveReportToFile(ctx context.Context, loggerInstance logger.Logger, report interface{}, path string) {
+	content, err := json.Marshal(report)
+	if err != nil {
+		loggerInstance.ErrorWithCtx(ctx,
+			"Failed to marshal report to json",
+			"err", err,
+			"path", path)
+	}
+	// get the directory path from the file path
+	dir := filepath.Dir(path)
+
+	// check if the directory exists, create it if it doesn't
+	if err := common.EnsureDirExists(ctx, loggerInstance, dir); err != nil {
+		loggerInstance.ErrorWithCtx(ctx,
+			"Failed to create a directory",
+			"directory", dir,
+			"error", err)
+	}
+
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		loggerInstance.ErrorWithCtx(ctx,
+			"Failed to write report to file",
+			"err", err,
+			"path", path)
+	} else {
+		loggerInstance.InfoWithCtx(ctx,
+			"Saved import report",
+			"reportPath", path)
+	}
 }

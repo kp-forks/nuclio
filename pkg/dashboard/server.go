@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/auth"
 	authfactory "github.com/nuclio/nuclio/pkg/auth/factory"
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/dashboard/functiontemplates"
 	"github.com/nuclio/nuclio/pkg/dockerclient"
 	"github.com/nuclio/nuclio/pkg/dockercreds"
@@ -217,37 +218,38 @@ func (s *Server) InstallMiddleware(router chi.Router) error {
 
 	corsOptions := cors.Options{
 		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowedHeaders: []string{
 			"Accept",
 			"Authorization",
 			"Content-Type",
 			"Content-Length",
 			"X-CSRF-Token",
-			"X-nuclio-log-level",
-			"X-nuclio-function-name",
-			"X-nuclio-function-namespace",
-			"X-nuclio-wait-function-action",
-			"X-nuclio-api-gateway-name",
-			"X-nuclio-api-gateway-namespace",
-			"X-nuclio-invoke-timeout",
-			"X-nuclio-invoke-via",
-			"X-nuclio-invoke-url",
-			"X-nuclio-project-name",
-			"X-nuclio-project-namespace",
-			"X-nuclio-function-event-name",
-			"X-nuclio-function-event-namespace",
-			"X-nuclio-function-enrich-apigateways",
-			"X-nuclio-path",
-			"x-nuclio-filter-contains",
-			"X-nuclio-delete-project-strategy",
-			"X-nuclio-delete-function-ignore-state-validation",
-			"X-nuclio-agw-validate-functions-existence",
+			headers.LogLevel,
+			headers.FunctionName,
+			headers.FunctionNamespace,
+			headers.WaitFunctionAction,
+			headers.ApiGatewayName,
+			headers.ApiGatewayNamespace,
+			headers.InvokeTimeout,
+			headers.InvokeVia,
+			headers.InvokeURL,
+			headers.ProjectName,
+			headers.ProjectNamespace,
+			headers.FunctionEventName,
+			headers.FunctionEventNamespace,
+			headers.FunctionEnrichApiGateways,
+			headers.Path,
+			headers.FilterContains,
+			headers.DeleteProjectStrategy,
+			headers.DeleteFunctionIgnoreStateValidation,
+			headers.ApiGatewayValidateFunctionExistence,
+			headers.CreationStateUpdatedTimeout,
 			iguazio.ProjectsRoleHeaderKey,
 		},
 		ExposedHeaders: []string{
 			"Content-Length",
-			"X-nuclio-logs",
+			headers.Logs,
 		},
 		AllowCredentials: true,
 		MaxAge:           300,

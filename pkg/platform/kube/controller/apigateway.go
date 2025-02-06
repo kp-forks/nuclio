@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -111,7 +111,7 @@ func (ago *apiGatewayOperator) CreateOrUpdate(ctx context.Context, object runtim
 	}
 
 	// create/update the api gateway
-	if _, err = ago.controller.apigatewayresClient.CreateOrUpdate(ctx, apiGateway); err != nil {
+	if _, err = ago.controller.apigatewayresClient.CreateOrUpdate(ctx, *apiGateway); err != nil {
 		ago.logger.WarnWithCtx(ctx, "Failed to create/update api gateway. Updating state accordingly")
 		if err := ago.setAPIGatewayState(ctx, apiGateway, platform.APIGatewayStateError, err); err != nil {
 			ago.logger.WarnWithCtx(ctx, "Failed to set api gateway state as error", "err", err)

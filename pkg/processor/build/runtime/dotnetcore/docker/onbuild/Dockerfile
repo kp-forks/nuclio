@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG NUCLIO_LABEL=latest
-ARG NUCLIO_ARCH=amd64
+ARG NUCLIO_DOCKER_IMAGE_TAG
 ARG NUCLIO_DOCKER_REPO=quay.io/nuclio
 
 # Supplies processor
-FROM ${NUCLIO_DOCKER_REPO}/processor:${NUCLIO_LABEL}-${NUCLIO_ARCH} as processor
+FROM ${NUCLIO_DOCKER_REPO}/processor:${NUCLIO_DOCKER_IMAGE_TAG} as processor
 
 # Supplies wrapper and nuclio-sdk-dotnetcore
-FROM mcr.microsoft.com/dotnet/core/sdk:3.1 as builder
+FROM mcr.microsoft.com/dotnet/sdk:7.0 as builder
 
 # Update packages
 RUN apt-get update && \
@@ -33,7 +32,11 @@ RUN apt-get update && \
 # Copy processor
 COPY --from=processor /home/nuclio/bin/processor /home/nuclio/bin/processor
 
-RUN git clone --branch master https://github.com/nuclio/nuclio-sdk-dotnetcore.git /home/nuclio/src/nuclio-sdk-dotnetcore
+# Fetch Nuclio .NET SDK
+RUN git clone \
+     --branch master \
+     https://github.com/nuclio/nuclio-sdk-dotnetcore.git \
+     /home/nuclio/src/nuclio-sdk-dotnetcore
 
 # Copy and build wrapper files
 COPY pkg/processor/runtime/dotnetcore /home/nuclio/src/wrapper

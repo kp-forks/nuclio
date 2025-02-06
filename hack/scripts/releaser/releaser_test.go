@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -121,15 +121,14 @@ func (suite *ReleaserTestSuite) TestBumpHelmChartVersion() {
 		Return(cmdrunner.RunResult{}, nil).
 		Once()
 
-	// replace image tag versions X times (e.g.: gke, helm aks)
+	// replace image tag versions
 	suite.cmdRunner.On("Run",
 		mock.Anything,
 		mock.MatchedBy(func(cmd string) bool {
 			return strings.HasPrefix(cmd, "git grep -lF")
 		}),
 		mock.Anything).
-		Return(cmdrunner.RunResult{}, nil).
-		Times(len(suite.releaser.resolveSupportedChartDirs()))
+		Return(cmdrunner.RunResult{}, nil)
 
 	// replace app version
 	suite.cmdRunner.On("Run",
@@ -149,6 +148,18 @@ func (suite *ReleaserTestSuite) TestBumpHelmChartVersion() {
 		}),
 		mock.Anything).
 		Return(cmdrunner.RunResult{}, nil).
+		Once()
+
+	// status
+	suite.cmdRunner.On("Run",
+		mock.Anything,
+		mock.MatchedBy(func(cmd string) bool {
+			return strings.HasPrefix(cmd, `git status`)
+		}),
+		mock.Anything).
+		Return(cmdrunner.RunResult{
+			Output: "M helm/Chart.yaml\nM helm/values.yaml",
+		}, nil).
 		Once()
 
 	// commit

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -68,6 +68,9 @@ type Platform interface {
 	// DeleteFunction will delete a previously deployed function
 	DeleteFunction(ctx context.Context, deleteFunctionOptions *DeleteFunctionOptions) error
 
+	// RedeployFunction will redeploy a previously deployed function
+	RedeployFunction(ctx context.Context, redeployFunctionOptions *RedeployFunctionOptions) error
+
 	// CreateFunctionInvocation will invoke a previously deployed function
 	CreateFunctionInvocation(ctx context.Context, createFunctionInvocationOptions *CreateFunctionInvocationOptions) (*CreateFunctionInvocationResult, error)
 
@@ -84,7 +87,10 @@ type Platform interface {
 	GetFunctionReplicaLogsStream(context.Context, *GetFunctionReplicaLogsStreamOptions) (io.ReadCloser, error)
 
 	// GetFunctionReplicaNames returns function replica names (Pod / Container names)
-	GetFunctionReplicaNames(context.Context, *functionconfig.Config) ([]string, error)
+	GetFunctionReplicaNames(context.Context, Function, opa.PermissionOptions) ([]string, error)
+
+	// GetFunctionReplicaContainers returns function replica containers (Pod / Container names)
+	GetFunctionReplicaContainers(context.Context, *functionconfig.Config, string) ([]string, error)
 
 	//
 	// Project
@@ -107,6 +113,9 @@ type Platform interface {
 
 	// WaitForProjectResourcesDeletion waits for all the project's resources to be deleted
 	WaitForProjectResourcesDeletion(ctx context.Context, projectMeta *ProjectMeta, duration time.Duration) error
+
+	// GetFunctionProject returns project instance for specific function
+	GetFunctionProject(ctx context.Context, functionConfig *functionconfig.Config) (Project, error)
 
 	//
 	// Function event
@@ -165,6 +174,9 @@ type Platform interface {
 	// GetScaleToZeroConfiguration returns scale to zero configuration
 	GetScaleToZeroConfiguration() *platformconfig.ScaleToZero
 
+	// GetDisableDefaultHttpTrigger returns if creation of default http trigger is disabled
+	GetDisableDefaultHttpTrigger() bool
+
 	// GetAllowedAuthenticationModes returns allowed authentication modes
 	GetAllowedAuthenticationModes() []string
 
@@ -176,6 +188,9 @@ type Platform interface {
 
 	// GetName returns the platform name
 	GetName() string
+
+	// InitializeContainerBuilder initializes the container builder, if not already initialized
+	InitializeContainerBuilder() error
 
 	// BuildAndPushContainerImage builds container image and pushes it into container registry
 	BuildAndPushContainerImage(ctx context.Context, buildOptions *containerimagebuilderpusher.BuildOptions) error
@@ -195,14 +210,8 @@ type Platform interface {
 	// GetDefaultRegistryCredentialsSecretName returns secret with credentials to push/pull from docker registry
 	GetDefaultRegistryCredentialsSecretName() string
 
-	// GetFunctionSecrets returns all the function's secrets
-	GetFunctionSecrets(ctx context.Context, functionName, functionNamespace string) ([]FunctionSecret, error)
-
-	// GetFunctionSecretMap returns a map of function's sensitive data
-	GetFunctionSecretMap(ctx context.Context, functionName, functionNamespace string) (map[string]string, error)
-
-	// GetFunctionSecretData returns the function's secret data
-	GetFunctionSecretData(ctx context.Context, functionName, functionNamespace string) (map[string][]byte, error)
+	// GetRegistryKind returns platform registry kind
+	GetRegistryKind() string
 
 	// SaveFunctionDeployLogs Save build logs from platform logger to function store or k8s
 	SaveFunctionDeployLogs(ctx context.Context, functionName, namespace string) error
@@ -219,6 +228,11 @@ type Platform interface {
 	// GetConfig returns platform config
 	GetConfig() *platformconfig.Config
 
+	// GetFunctionScrubber returns function config scrubber
+	GetFunctionScrubber() *functionconfig.Scrubber
+
+	// GetAPIGatewayScrubber returns function config scrubber
+	GetAPIGatewayScrubber() *APIGatewayScrubber
 	//
 	// OPA
 	//

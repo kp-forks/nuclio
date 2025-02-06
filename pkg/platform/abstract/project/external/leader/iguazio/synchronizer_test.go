@@ -1,7 +1,7 @@
 //go:build test_unit && test_broken
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -189,33 +189,6 @@ func (suite *SynchronizerTestSuite) TestLeaderProjectsThatExistInternally() {
 		[]*platform.CreateProjectOptions{},
 		[]*platform.UpdateProjectOptions{},
 		&testBeginningTime)
-}
-
-func (suite *SynchronizerTestSuite) TestFilterInvalidLabels() {
-	invalidLabels := map[string]string{
-		"my@weird/label": "value",
-		"my.wierd/label": "value@",
-		"%weird+/label":  "v8$alue",
-	}
-
-	labels := map[string]string{
-		"valid":          "label",
-		"another-valid":  "label-value",
-		"also_123_valid": "label_456_value",
-	}
-
-	// add invalid labels to labels
-	for key, value := range invalidLabels {
-		labels[key] = value
-	}
-
-	filteredLabels := suite.synchronizer.filterInvalidLabels(labels)
-
-	suite.Require().Equal(len(filteredLabels), len(labels)-len(invalidLabels))
-	for key := range invalidLabels {
-		_, ok := filteredLabels[key]
-		suite.Require().False(ok, "invalid label %s should not be in filtered labels", key)
-	}
 }
 
 func (suite *SynchronizerTestSuite) testSynchronizeProjectsFromLeader(namespace string,

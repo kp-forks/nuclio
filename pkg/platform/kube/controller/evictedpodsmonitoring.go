@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -96,7 +97,7 @@ func (epm *EvictedPodsMonitoring) cleanupEvictedPods(ctx context.Context) {
 			// get all failed function pods
 			stalePodsFieldSelector := common.CompileStalePodsFieldSelector()
 			pods, err := epm.controller.kubeClientSet.CoreV1().Pods(epm.controller.namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: "nuclio.io/class=function",
+				LabelSelector: fmt.Sprintf("%s=function", common.NuclioLabelKeyClass),
 				FieldSelector: stalePodsFieldSelector,
 			})
 			if err != nil {

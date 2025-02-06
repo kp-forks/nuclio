@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package command
 import (
 	"context"
 	"os"
+	"runtime"
 
 	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -30,19 +31,22 @@ import (
 	"github.com/nuclio/zap"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
+
 	// load authentication modes
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 type RootCommandeer struct {
-	loggerInstance logger.Logger
-	cmd            *cobra.Command
-	platformName   string
-	platform       platform.Platform
-	namespace      string
-	verbose        bool
-	KubeconfigPath string
+	loggerInstance            logger.Logger
+	cmd                       *cobra.Command
+	platformName              string
+	platform                  platform.Platform
+	namespace                 string
+	verbose                   bool
+	KubeconfigPath            string
+	concurrency               int
+	enableMaskSensitiveFields bool
 
 	platformConfiguration *platformconfig.Config
 }
@@ -64,6 +68,8 @@ func NewRootCommandeer() *RootCommandeer {
 	cmd.PersistentFlags().BoolVarP(&commandeer.verbose, "verbose", "v", false, "Verbose output")
 	cmd.PersistentFlags().StringVarP(&commandeer.platformName, "platform", "", defaultPlatformType, "Platform identifier - \"kube\", \"local\", or \"auto\"")
 	cmd.PersistentFlags().StringVarP(&commandeer.namespace, "namespace", "n", defaultNamespace, "Namespace")
+	cmd.PersistentFlags().IntVar(&commandeer.concurrency, "concurrency", runtime.NumCPU(), "Max number of parallel patches. The default value is equal to the number of CPUs.")
+	cmd.PersistentFlags().BoolVar(&commandeer.enableMaskSensitiveFields, "mask-sensitive-fields", false, "Enable sensitive fields masking")
 
 	// platform specific
 	cmd.PersistentFlags().StringVarP(&commandeer.KubeconfigPath, "kubeconfig", "k", "", "Path to a Kubernetes configuration file (admin.conf)")
@@ -80,6 +86,8 @@ func NewRootCommandeer() *RootCommandeer {
 		newCreateCommandeer(ctx, commandeer).cmd,
 		newExportCommandeer(ctx, commandeer).cmd,
 		newImportCommandeer(ctx, commandeer).cmd,
+		newBetaCommandeer(ctx, commandeer).cmd,
+		newParseCommandeer(ctx, commandeer).cmd,
 	)
 
 	commandeer.cmd = cmd
@@ -102,12 +110,15 @@ func (rc *RootCommandeer) CreateMarkdown(path string) error {
 	return doc.GenMarkdownTree(rc.cmd, path)
 }
 
-func (rc *RootCommandeer) initialize() error {
+func (rc *RootCommandeer) initialize(initPlatform bool) error {
 	var err error
 
 	rc.loggerInstance, err = rc.createLogger()
 	if err != nil {
 		return errors.Wrap(err, "Failed to create logger")
+	}
+	if !initPlatform {
+		return nil
 	}
 
 	// TODO: accept platform config path as arg
@@ -117,6 +128,9 @@ func (rc *RootCommandeer) initialize() error {
 	}
 
 	rc.platformConfiguration.Kube.KubeConfigPath = rc.KubeconfigPath
+	if rc.enableMaskSensitiveFields {
+		rc.platformConfiguration.EnableSensitiveFieldMasking()
+	}
 
 	// do not let nuctl monitor function containers
 	// nuctl is a CLI tool, to enable function container healthiness, use Nuclio dashboard

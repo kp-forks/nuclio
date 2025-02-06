@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,12 +16,20 @@ limitations under the License.
 
 package testutils
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/nuclio/errors"
+)
 
 type roundTripFunc func(req *http.Request) *http.Response
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req), nil
+	response := f(req)
+	if response == nil {
+		return nil, errors.New("EOF")
+	}
+	return response, nil
 }
 
 func newHTTPClient(fn roundTripFunc) *http.Client { // nolint: interfacer

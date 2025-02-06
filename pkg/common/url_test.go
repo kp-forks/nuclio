@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -78,6 +78,26 @@ func (ts *IsURLTestSuite) TestNormalizeURLPath() {
 		"a/b/c/////":           "/a/b/c/",
 	} {
 		ts.Assert().Equal(expectedOutputPath, NormalizeURLPath(inputPath))
+	}
+}
+
+func (ts *IsURLTestSuite) TestValidatePath() {
+	for inputPath, expectedOutput := range map[string]bool{
+		"/path/to/resource":           true,
+		"another/path/to/resource123": true,
+		"/yet-another_path":           true,
+		"yet-another_path":            true,
+		"invalid path":                false,
+		"/":                           true,
+		"":                            true,
+		"simplepath":                  true,
+		"complex/path-with-123_and-mixed_characters/": true,
+		"/path/with/special/characters/!@#$%^&*()":    false,
+		"/path/with/encoded/characters/%20":           false,
+		"another/weird@path":                          false,
+		"/path/with?query=parameters&and=more":        false,
+	} {
+		ts.Require().Equal(ValidateURLPath(inputPath), expectedOutput)
 	}
 }
 

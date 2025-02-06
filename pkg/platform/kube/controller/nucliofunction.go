@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
-	detachcontext "github.com/nuclio/nuclio/pkg/context"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
+	"github.com/nuclio/nuclio/pkg/platform/abstract"
 	nuclioio "github.com/nuclio/nuclio/pkg/platform/kube/apis/nuclio.io/v1beta1"
 	"github.com/nuclio/nuclio/pkg/platform/kube/client"
 	"github.com/nuclio/nuclio/pkg/platform/kube/functionres"
@@ -102,9 +102,11 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 				"function", function,
 			},
 			CustomHandler: func(panicError error) {
-				fo.setFunctionError(ctx, // nolint: errcheck
+				fo.setFunctionError( // nolint: errcheck
+					ctx,
 					function,
 					functionconfig.FunctionStateError,
+					nil,
 					errors.Wrap(panicError, "Failed to create/update function"))
 			},
 		})
@@ -153,6 +155,38 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 			function, &functionconfig.Status{
 				State: functionconfig.FunctionStateImported,
 			})
+	}
+
+	var prevState string
+
+	// clean the irrelevant annotations from the CRD before adding resources
+	if function.ObjectMeta.Annotations != nil {
+		prevState = function.ObjectMeta.Annotations[functionconfig.FunctionAnnotationPrevState]
+		annotationsToClean := []string{
+			functionconfig.FunctionAnnotationForceUpdate,
+			functionconfig.FunctionAnnotationPrevState,
+			functionconfig.FunctionAnnotationSkipDeploy,
+		}
+		for _, annotation := range annotationsToClean {
+			delete(function.ObjectMeta.Annotations, annotation)
+		}
+	}
+
+	// prevState annotation presents in the function config after function being imported and redeployed
+	// this allows to deploy function right to the state which function had before it was exported
+	if functionconfig.IsPreviousFunctionStateAllowedToBeSet(functionconfig.FunctionState(prevState)) {
+		fo.logger.InfoWith("Previous status of function is set in annotation, so function will be moved to this state.",
+			"function", function.Name,
+			"prevState", prevState)
+		switch prevState {
+		case string(functionconfig.FunctionStateScaledToZero):
+			function.Status.State = functionconfig.FunctionStateWaitingForScaleResourcesToZero
+		case string(functionconfig.FunctionStateImported):
+			return fo.setFunctionStatus(ctx,
+				function, &functionconfig.Status{
+					State: functionconfig.FunctionStateImported,
+				})
+		}
 	}
 
 	//we respond to ready to complete the scale from zero flow. we want to skip flows where once the function
@@ -206,13 +240,20 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 
 	functionResourcesCreateOrUpdateTimestamp := time.Now()
 
+	fo.logger.DebugWithCtx(ctx,
+		"Enriching NodeSelector",
+		"functionNamespace", function.Namespace,
+		"functionName", function.Name)
+
+	// enrich node selectors with values from function, project and platform and save enriched value to function.status
+	if err := fo.enrichNodeSelector(ctx, function); err != nil {
+		return fo.setFunctionError(ctx, function, functionconfig.FunctionStateError, nil, errors.Wrap(err, "Failed to enrich node selectors when create/update function"))
+	}
+
 	// ensure function resources (deployment, ingress, configmap, etc ...)
 	resources, err := fo.functionresClient.CreateOrUpdate(ctx, function, fo.imagePullSecrets)
 	if err != nil {
-		return fo.setFunctionError(ctx,
-			function,
-			functionconfig.FunctionStateError,
-			errors.Wrap(err, "Failed to create/update function"))
+		return fo.setFunctionError(ctx, function, functionconfig.FunctionStateError, nil, errors.Wrap(err, "Failed to create/update function"))
 	}
 
 	// readinessTimeout would be zero when
@@ -226,11 +267,25 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 		if err, functionState := fo.functionresClient.WaitAvailable(waitContext,
 			function,
 			functionResourcesCreateOrUpdateTimestamp); err != nil {
+
+			// Update the function selector if function was scaling from zero and waiting for availability failed,
+			// to prevent the function from continually leading to a dlx
+			_ = fo.updateFunctionSelectorIfRequired(ctx, function)
+
 			return fo.setFunctionError(ctx,
 				function,
 				functionState,
+				resources,
 				errors.Wrap(err, "Failed to wait for function resources to be available"))
 		}
+	}
+
+	if err = fo.updateFunctionSelectorIfRequired(ctx, function); err != nil {
+		return fo.setFunctionError(ctx,
+			function,
+			functionconfig.FunctionStateError,
+			nil,
+			errors.Wrap(err, "Failed to patch function service selector when scale from zero"))
 	}
 
 	waitingStates := []functionconfig.FunctionState{
@@ -243,6 +298,7 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 
 		var scaleEvent scalertypes.ScaleEvent
 		var finalState functionconfig.FunctionState
+
 		switch function.Status.State {
 		case functionconfig.FunctionStateWaitingForScaleResourcesToZero:
 			scaleEvent = scalertypes.ScaleToZeroCompletedScaleEvent
@@ -258,9 +314,10 @@ func (fo *functionOperator) CreateOrUpdate(ctx context.Context, object runtime.O
 		// NOTE: this reconstructs function status and hence omits all other function status fields
 		// ... such as message and logs.
 		functionStatus := &functionconfig.Status{
-			State:          finalState,
-			Logs:           function.Status.Logs,
-			ContainerImage: function.Spec.Image,
+			State:                finalState,
+			Logs:                 function.Status.Logs,
+			ContainerImage:       function.Spec.Image,
+			EnrichedNodeSelector: function.Status.EnrichedNodeSelector,
 		}
 
 		if err := fo.populateFunctionInvocationStatus(function, functionStatus, resources); err != nil {
@@ -307,14 +364,28 @@ func (fo *functionOperator) start(ctx context.Context) error {
 	return nil
 }
 
-func (fo *functionOperator) setFunctionError(ctx context.Context,
+func (fo *functionOperator) updateFunctionSelectorIfRequired(ctx context.Context, function *nuclioio.NuclioFunction) error {
+	if function.Status.State == functionconfig.FunctionStateWaitingForScaleResourcesFromZero {
+		fo.logger.DebugWithCtx(ctx, "Patching function service selector when scaling from zero")
+		if err := fo.functionresClient.UpdatedServiceSelectorWhenScaledFromZero(ctx, function); err != nil {
+			fo.logger.WarnWith("Failed to patch function service selector when scaling from zero",
+				"error", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (fo *functionOperator) setFunctionError(
+	ctx context.Context,
 	function *nuclioio.NuclioFunction,
 	functionErrorState functionconfig.FunctionState,
+	resources functionres.Resources,
 	err error) error {
 
-	// context might timed out, but we still want to set the error,
+	// context might time out, but we still want to set the error,
 	// so we'll use a detached background context
-	detachedContext := detachcontext.NewDetached(ctx)
+	detachedContext := context.WithoutCancel(ctx)
 
 	// whatever the error, try to update the function CR
 	fo.logger.WarnWithCtx(detachedContext,
@@ -323,13 +394,24 @@ func (fo *functionOperator) setFunctionError(ctx context.Context,
 		"functionName", function.Name,
 		"err", err)
 
-	if setStatusErr := fo.setFunctionStatus(detachedContext, function, &functionconfig.Status{
+	functionStatus := &functionconfig.Status{
 		Logs:                   function.Status.Logs,
 		State:                  functionErrorState,
 		Message:                errors.GetErrorStackString(err, 10),
 		InternalInvocationURLs: []string{},
 		ExternalInvocationURLs: []string{},
-	}); setStatusErr != nil {
+		EnrichedNodeSelector:   function.Status.EnrichedNodeSelector,
+	}
+
+	// if function is unhealthy, it might be invokable, and
+	// it can become ready, so enrich invocation status
+	if functionErrorState == functionconfig.FunctionStateUnhealthy && resources != nil {
+		if err := fo.populateFunctionInvocationStatus(function, functionStatus, resources); err != nil {
+			return errors.Wrap(err, "Failed to populate function invocation status")
+		}
+	}
+
+	if setStatusErr := fo.setFunctionStatus(detachedContext, function, functionStatus); setStatusErr != nil {
 		fo.logger.WarnWithCtx(detachedContext,
 			"Failed to update function on error",
 			"setStatusErr", errors.Cause(setStatusErr))
@@ -376,7 +458,7 @@ func (fo *functionOperator) getFunctionHTTPPort(functionResources functionres.Re
 
 	if service != nil && len(service.Spec.Ports) != 0 {
 		for _, port := range service.Spec.Ports {
-			if port.Name == functionres.ContainerHTTPPortName {
+			if port.Name == abstract.FunctionContainerHTTPPortName {
 				httpPort = int(port.NodePort)
 				break
 			}
@@ -440,4 +522,34 @@ func (fo *functionOperator) populateFunctionInvocationStatus(function *nuclioio.
 	}
 	return nil
 
+}
+
+// enrichNodeSelector enriches function node selector
+// if node selector is not specified in function config, we firstly try to get it from project CRD
+// if it is missing in project CRD, then we try to get it from platform config
+func (fo *functionOperator) enrichNodeSelector(ctx context.Context, function *nuclioio.NuclioFunction) error {
+	var projectName string
+	var ok bool
+
+	if projectName, ok = function.Labels[common.NuclioResourceLabelKeyProjectName]; !ok {
+		return errors.New("Failed to determine a project name for a function")
+	}
+
+	project, err := fo.controller.nuclioClientSet.NuclioV1beta1().
+		NuclioProjects(function.Namespace).
+		Get(ctx, projectName, metav1.GetOptions{})
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("Failed to get project %s", projectName))
+	}
+
+	function.EnrichNodeSelector(
+		fo.controller.GetPlatformConfiguration().Kube.DefaultFunctionNodeSelector,
+		project.Spec.DefaultFunctionNodeSelector,
+	)
+
+	fo.logger.DebugWithCtx(ctx, "Successfully enriched NodeSelector",
+		"functionName", function.Name,
+		"projectName", projectName,
+		"NodeSelector", function.Status.EnrichedNodeSelector)
+	return nil
 }

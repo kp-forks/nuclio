@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,8 +29,12 @@ const (
 	RestartPolicyNameOnFailure     RestartPolicyName = "on-failure"
 )
 
-// RunOptionsNoPort urge docker shell client not to map an explicit source port (but rather a random one)
-const RunOptionsNoPort int = -1
+const (
+	// RunOptionsRandomPort urge docker shell client not to map an explicit source port (but rather a random one)
+	RunOptionsRandomPort int = -1
+	// RunOptionsNoPort urge docker shell client not to map any port
+	RunOptionsNoPort int = -2
+)
 
 // LogInOptions are options for logging in
 type LogInOptions struct {
@@ -47,6 +51,7 @@ type BuildOptions struct {
 	NoCache        bool
 	Pull           bool
 	BuildArgs      map[string]string
+	BuildFlags     map[string]bool
 }
 
 // RunOptions are options for running a docker image
@@ -65,10 +70,13 @@ type RunOptions struct {
 	Network          string
 	RestartPolicy    *RestartPolicy
 	GPUs             string
+	CPUs             string
+	Memory           string
 	MountPoints      []MountPoint
 	RunAsUser        *int64
 	RunAsGroup       *int64
 	FSGroup          *int64
+	Devices          []string
 }
 
 // ExecOptions are options for executing a command in a container
@@ -87,7 +95,7 @@ type GetContainerOptions struct {
 	ID      string
 }
 
-// ContainerJSONBase contains response of Engine API:
+// Container contains response of Engine API:
 // GET "/containers/{name:.*}/json"
 type Container struct {
 	ID              string `json:"Id"`

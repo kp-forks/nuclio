@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package runtime
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/controlcommunication"
 
 	"github.com/nuclio/logger"
+	"github.com/nuclio/nuclio-sdk-go"
 )
 
 type Statistics struct {
@@ -55,3 +57,13 @@ type Configuration struct {
 	WorkerTerminationTimeout time.Duration
 	ControlMessageBroker     *controlcommunication.AbstractControlMessageBroker
 }
+
+type ResponseWithErrors struct {
+	nuclio.Response
+	EventId         string
+	SubmitError     error
+	ProcessError    error
+	NoResponseError error
+}
+
+var ErrNoResponseFromBatchResponse = errors.New("processor hasn't received corresponding response for the event")

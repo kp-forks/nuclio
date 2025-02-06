@@ -1,7 +1,7 @@
 //go:build test_unit
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,6 +44,10 @@ func (mr *MockRuntime) ProcessEvent(event nuclio.Event, functionLogger logger.Lo
 func (mr *MockRuntime) GetFunctionLogger() logger.Logger {
 	return nil
 }
+func (mr *MockRuntime) ProcessBatch(batch []nuclio.Event, functionLogger logger.Logger) ([]*runtime.ResponseWithErrors, error) {
+	args := mr.Called(batch, functionLogger)
+	return args.Get(0).([]*runtime.ResponseWithErrors), args.Error(1)
+}
 
 func (mr *MockRuntime) GetStatistics() *runtime.Statistics {
 	return nil
@@ -76,7 +80,17 @@ func (mr *MockRuntime) SupportsRestart() bool {
 	return true
 }
 
+func (mr *MockRuntime) Drain() error {
+	args := mr.Called()
+	return args.Error(0)
+}
+
 func (mr *MockRuntime) Terminate() error {
+	args := mr.Called()
+	return args.Error(0)
+}
+
+func (mr *MockRuntime) Continue() error {
 	args := mr.Called()
 	return args.Error(0)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,9 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
@@ -39,6 +42,17 @@ import (
 	"github.com/nuclio/nuclio/pkg/processor/healthcheck"
 	"github.com/nuclio/nuclio/pkg/processor/metricsink"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
+	"github.com/nuclio/nuclio/pkg/processor/timeout"
+	"github.com/nuclio/nuclio/pkg/processor/trigger"
+	httpnuclio "github.com/nuclio/nuclio/pkg/processor/trigger/http"
+	"github.com/nuclio/nuclio/pkg/processor/util/clock"
+	"github.com/nuclio/nuclio/pkg/processor/webadmin"
+	"github.com/nuclio/nuclio/pkg/processor/worker"
+
+	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
+	"github.com/v3io/version-go"
+
 	// load all runtimes
 	_ "github.com/nuclio/nuclio/pkg/processor/runtime/dotnetcore"
 	_ "github.com/nuclio/nuclio/pkg/processor/runtime/golang"
@@ -47,11 +61,8 @@ import (
 	_ "github.com/nuclio/nuclio/pkg/processor/runtime/python"
 	_ "github.com/nuclio/nuclio/pkg/processor/runtime/ruby"
 	_ "github.com/nuclio/nuclio/pkg/processor/runtime/shell"
-	"github.com/nuclio/nuclio/pkg/processor/timeout"
-	"github.com/nuclio/nuclio/pkg/processor/trigger"
 	// load all triggers
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/cron"
-	_ "github.com/nuclio/nuclio/pkg/processor/trigger/http"
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/kafka"
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/kickstart"
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/kinesis"
@@ -63,15 +74,8 @@ import (
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/pubsub"
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/rabbitmq"
 	_ "github.com/nuclio/nuclio/pkg/processor/trigger/v3iostream"
-	"github.com/nuclio/nuclio/pkg/processor/util/clock"
-	"github.com/nuclio/nuclio/pkg/processor/webadmin"
-	"github.com/nuclio/nuclio/pkg/processor/worker"
 	// load all sinks
 	_ "github.com/nuclio/nuclio/pkg/sinks"
-
-	"github.com/nuclio/errors"
-	"github.com/nuclio/logger"
-	"github.com/v3io/version-go"
 )
 
 // Processor is responsible to process events
@@ -129,12 +133,19 @@ func NewProcessor(configurationPath string, platformConfigurationPath string) (*
 	newProcessor.logger.DebugWith("Read configuration",
 		"config", string(indentedProcessorConfiguration))
 
-	// restore function configuration from secret
-	restoredFunctionConfig, err := newProcessor.restoreFunctionConfig(&processorConfiguration.Config)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to restore function configuration")
+	// restore function configuration from secret if needed
+	if !processorConfiguration.Spec.DisableSensitiveFieldsMasking {
+
+		// check if env var to restore is set
+		if restoreConfigFromSecret := common.GetEnvOrDefaultBool(common.RestoreConfigFromSecretEnvVar,
+			false); restoreConfigFromSecret {
+			restoredFunctionConfig, err := newProcessor.restoreFunctionConfig(&processorConfiguration.Config)
+			if err != nil {
+				return nil, errors.Wrap(err, "Failed to restore function configuration")
+			}
+			processorConfiguration.Config = *restoredFunctionConfig
+		}
 	}
-	processorConfiguration.Config = *restoredFunctionConfig
 
 	// save platform configuration in process configuration
 	processorConfiguration.PlatformConfig = platformConfiguration
@@ -180,6 +191,13 @@ func NewProcessor(configurationPath string, platformConfigurationPath string) (*
 		return nil, errors.Wrap(err, "Failed to create metric sinks")
 	}
 
+	// if default http trigger creation is disabled and there is no any other http trigger we need to start internal
+	// healthcheck service
+	if (processorConfiguration.Spec.DisableDefaultHTTPTrigger == nil && platformConfiguration.DisableDefaultHTTPTrigger ||
+		processorConfiguration.Spec.DisableDefaultHTTPTrigger != nil && *processorConfiguration.Spec.DisableDefaultHTTPTrigger) &&
+		len(functionconfig.GetTriggersByKind(processorConfiguration.Spec.Triggers, "http")) == 0 {
+		startInternalHealthCheck()
+	}
 	return newProcessor, nil
 }
 
@@ -189,7 +207,10 @@ func (p *Processor) Start() error {
 	// create a goroutine that restarts a trigger if needed
 	go p.listenOnRestartTriggerChannel()
 
-	p.logger.DebugWith("Starting triggers", "triggers", p.triggers)
+	// handles system signals (for now only SIGTERM)
+	go p.handleSignals()
+
+	p.logger.Debug("Starting triggers")
 
 	// iterate over all triggers and start them
 	for _, triggerInstance := range p.triggers {
@@ -198,6 +219,10 @@ func (p *Processor) Start() error {
 				"kind", triggerInstance.GetKind(),
 				"err", err.Error())
 			return errors.Wrap(err, "Failed to start trigger")
+		} else {
+			p.logger.DebugWith("Trigger successfully started",
+				"kind", triggerInstance.GetKind(),
+				"name", triggerInstance.GetName())
 		}
 	}
 
@@ -294,7 +319,7 @@ func (p *Processor) readConfiguration(configurationPath string) (*processor.Conf
 func (p *Processor) restoreFunctionConfig(config *functionconfig.Config) (*functionconfig.Config, error) {
 
 	// initialize scrubber, we don't care about sensitive fields and kubeClientSet
-	scrubber := functionconfig.NewScrubber(nil, nil)
+	scrubber := functionconfig.NewScrubber(p.logger, nil, nil)
 
 	secretsMap, err := p.getSecretsMap(scrubber)
 	if err != nil {
@@ -303,6 +328,7 @@ func (p *Processor) restoreFunctionConfig(config *functionconfig.Config) (*funct
 
 	// if there are no secrets, return
 	if len(secretsMap) == 0 {
+		p.logger.Debug("Secret is empty, skipping config restoration")
 		return config, nil
 	}
 
@@ -311,7 +337,7 @@ func (p *Processor) restoreFunctionConfig(config *functionconfig.Config) (*funct
 		return nil, errors.Wrap(err, "Failed to restore function config")
 	}
 
-	return restoredFunctionConfig, nil
+	return functionconfig.GetFunctionConfigFromInterface(restoredFunctionConfig), nil
 }
 
 func (p *Processor) getSecretsMap(scrubber *functionconfig.Scrubber) (map[string]string, error) {
@@ -325,9 +351,14 @@ func (p *Processor) getSecretsMap(scrubber *functionconfig.Scrubber) (map[string
 	contentPath := path.Join(filePath, functionconfig.SecretContentKey)
 
 	// check if a secret is mounted
-	if !common.FileExists(contentPath) {
-		p.logger.Debug("No secret is not mounted to function pod, continuing without restoring function config")
-		return map[string]string{}, nil
+	if _, err := os.Stat(contentPath); err != nil {
+		p.logger.WarnWith("Failed to check if secret file exists",
+			"path", contentPath,
+			"err", err)
+		if os.IsNotExist(err) {
+			return nil, errors.New("Secret is not mounted to function pod")
+		}
+		return nil, errors.Wrap(err, "Failed to check if secret file exists")
 	}
 
 	p.logger.Debug("Secret is mounted to function pod, restoring function config")
@@ -336,6 +367,10 @@ func (p *Processor) getSecretsMap(scrubber *functionconfig.Scrubber) (map[string
 	encodedSecret, err := os.ReadFile(contentPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to read function secret")
+	}
+
+	if string(encodedSecret) == "" {
+		return map[string]string{}, nil
 	}
 
 	return scrubber.DecodeSecretsMapContent(string(encodedSecret))
@@ -350,6 +385,13 @@ func (p *Processor) createTriggers(processorConfiguration *processor.Configurati
 	lock := sync.Mutex{}
 
 	platformKind := processorConfiguration.PlatformConfig.Kind
+	if processorConfiguration.Meta.Labels == nil {
+
+		// backwards compatibility, for function created before labels were introduced
+		processorConfiguration.Meta.Labels = map[string]string{
+			common.NuclioResourceLabelKeyProjectName: "",
+		}
+	}
 
 	for triggerName, triggerConfiguration := range processorConfiguration.Spec.Triggers {
 		triggerName, triggerConfiguration := triggerName, triggerConfiguration
@@ -405,39 +447,6 @@ func (p *Processor) createTriggers(processorConfiguration *processor.Configurati
 	}
 
 	return triggers, nil
-}
-
-func (p *Processor) hasHTTPTrigger(triggers []trigger.Trigger) bool {
-	for _, existingTrigger := range triggers {
-		if existingTrigger.GetKind() == "http" {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (p *Processor) createDefaultHTTPTrigger(processorConfiguration *processor.Configuration) (trigger.Trigger, error) {
-	defaultHTTPTriggerConfiguration := functionconfig.Trigger{
-		Class:      "sync",
-		Kind:       "http",
-		MaxWorkers: 1,
-		URL:        common.GetEnvOrDefaultString("NUCLIO_DEFAULT_HTTP_TRIGGER_URL", ":8080"),
-	}
-
-	p.logger.DebugWith("Creating default HTTP event source",
-		"configuration", &defaultHTTPTriggerConfiguration)
-
-	return trigger.RegistrySingleton.NewTrigger(p.logger,
-		"http",
-		"http",
-		&defaultHTTPTriggerConfiguration,
-		&runtime.Configuration{
-			Configuration:  processorConfiguration,
-			FunctionLogger: p.functionLogger,
-		},
-		p.namedWorkerAllocators,
-		p.restartTriggerChan)
 }
 
 func (p *Processor) createWebAdminServer(platformConfiguration *platformconfig.Config) (*webadmin.Server, error) {
@@ -624,4 +633,57 @@ func (p *Processor) setWorkersStatus(triggerInstance trigger.Trigger, status sta
 	}
 
 	return nil
+}
+
+// handleSignals creates a signal handler, so on signal processor gracefully terminated
+func (p *Processor) handleSignals() {
+	var captureSignal = make(chan os.Signal, 1)
+
+	// when k8s deletes pods, it sends SIGTERM (https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination)
+	// when docker stops container it sends SIGTERM by default (https://docs.docker.com/engine/reference/commandline/stop/)
+	// but you can specify a specific signal with a specific option, so we support SIGABRT and SIGINT as well
+	signal.Notify(captureSignal, syscall.SIGTERM, syscall.SIGABRT, syscall.SIGINT)
+	p.terminateAllTriggers(<-captureSignal)
+	p.Stop()
+}
+
+func (p *Processor) terminateAllTriggers(signal os.Signal) {
+	p.logger.WarnWith("Got system signal", "signal", signal.String())
+
+	wg := &sync.WaitGroup{}
+	for _, triggerInstance := range p.triggers {
+		wg.Add(1)
+
+		// drains all workers in trigger (for each trigger in parallel)
+		go func(triggerInstance trigger.Trigger, wg *sync.WaitGroup) {
+			defer wg.Done()
+
+			// stop trigger
+			if _, err := triggerInstance.Stop(false); err != nil {
+				p.logger.WarnWith("Failed to stop trigger",
+					"triggerKind", triggerInstance.GetKind(),
+					"triggerName", triggerInstance.GetName(),
+					"err", err.Error())
+			}
+
+			// invoke termination callbacks for all workers
+			if err := triggerInstance.SignalWorkersToTerminate(); err != nil {
+				p.logger.WarnWith("Failed to signal worker termination",
+					"triggerKind", triggerInstance.GetKind(),
+					"triggerName", triggerInstance.GetName(),
+					"err", err.Error())
+			}
+		}(triggerInstance, wg)
+	}
+	wg.Wait()
+	p.logger.Info("All triggers are terminated")
+}
+
+// startInternalHealthCheck runs healthcheck service for internal purposes just in case of disabled default http trigger
+func startInternalHealthCheck() {
+	http.HandleFunc(httpnuclio.InternalHealthPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	go http.ListenAndServe(":8080", nil) // nolint: errcheck
 }

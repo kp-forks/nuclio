@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,18 +16,14 @@
 ARG NUCLIO_BASE_IMAGE_NAME
 ARG NUCLIO_BASE_IMAGE_TAG
 
-FROM ${NUCLIO_BASE_IMAGE_NAME}:${NUCLIO_BASE_IMAGE_TAG}
-
-ARG GOOS=linux
-ARG GOARCH=amd64
-ARG NUCLIO_GO_PROXY=${NUCLIO_GO_PROXY}
-
-ENV GOOS $GOOS
-ENV GOARCH $GOARCH
-ENV GOPROXY $NUCLIO_GO_PROXY
+FROM --platform=${BUILDPLATFORM} ${NUCLIO_BASE_IMAGE_NAME}:${NUCLIO_BASE_IMAGE_TAG}
 
 WORKDIR /nuclio
 
-COPY go.mod go.sum ./
+ENV CGO_ENABLED=0
+
+COPY go.* ./
 
 RUN go mod download
+
+COPY . .

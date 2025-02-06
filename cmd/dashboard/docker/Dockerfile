@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,13 +15,15 @@
 #
 # Build assets stage: builds the dashboard assets (js, html, css, etc)
 #
-ARG NGINX_IMAGE=nginx
-ARG NUCLIO_LABEL
+ARG NGINX_IMAGE=gcr.io/iguazio/nginx:1.25-alpine
+ARG NUCLIO_DOCKER_IMAGE_TAG
+ARG UHTTPC_IMAGE=gcr.io/iguazio/uhttpc:0.0.1
 ARG UHTTPC_ARCH=amd64
 ARG NUCLIO_DOCKER_ALPINE_IMAGE
 ARG NUCLIO_DOCKER_REPO
+ARG NODE_IMAGE_NAME
 
-FROM gcr.io/iguazio/node:14.21 as build-static
+FROM $NODE_IMAGE_NAME as build-static
 
 # copy source tree
 COPY ./pkg/dashboard/ui /home/nuclio/dashboard/src
@@ -37,21 +39,16 @@ RUN npm install -g gulp \
 #
 # Build binary stage: builds the dashboard binary
 #
-FROM $NUCLIO_DOCKER_REPO/nuclio-base:$NUCLIO_LABEL as build-binary
+FROM $NUCLIO_DOCKER_REPO/nuclio-builder:$NUCLIO_DOCKER_IMAGE_TAG as build-binary
 
 ARG NUCLIO_GO_LINK_FLAGS_INJECT_VERSION
-ARG GOOS=linux
-ARG GOARCH=amd64
 
-# build the dashboard
-RUN GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build \
-    -a \
-    -installsuffix cgo \
+RUN go build \
     -ldflags="${NUCLIO_GO_LINK_FLAGS_INJECT_VERSION}" \
     -o dashboard cmd/dashboard/main.go
 
 
-FROM gcr.io/iguazio/uhttpc:0.0.1-$UHTTPC_ARCH AS uhttpc
+FROM $UHTTPC_IMAGE-$UHTTPC_ARCH AS uhttpc
 
 #
 # Output stage: Creates version file, copies binary and assets to an alpine image
@@ -61,7 +58,7 @@ FROM $NUCLIO_DOCKER_ALPINE_IMAGE as downloaddocker
 
 # docker client
 ARG DOCKER_CLI_ARCH=x86_64
-ARG DOCKER_CLI_VERSION="19.03.14"
+ARG DOCKER_CLI_VERSION="23.0.1"
 ENV DOCKER_CLI_DOWNLOAD_URL="https://download.docker.com/linux/static/stable/$DOCKER_CLI_ARCH/docker-$DOCKER_CLI_VERSION.tgz"
 
 RUN apk --update --no-cache add curl \

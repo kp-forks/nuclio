@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -108,6 +108,9 @@ func (c *ShellClient) Build(buildOptions *BuildOptions) error {
 	}
 
 	buildArgs := ""
+	for buildFlag := range buildOptions.BuildFlags {
+		buildArgs += fmt.Sprintf("%s ", buildFlag)
+	}
 	for buildArgName, buildArgValue := range buildOptions.BuildArgs {
 		buildArgs += fmt.Sprintf("--build-arg %s=%s ", buildArgName, buildArgValue)
 	}
@@ -143,6 +146,38 @@ func (c *ShellClient) CopyObjectsFromImage(imageName string,
 			objectImagePath,
 			objectLocalPath); err != nil && !allowCopyErrors {
 			return errors.Wrapf(err, "Can't copy %s:%s -> %s", containerID, objectImagePath, objectLocalPath)
+		}
+	}
+
+	return nil
+}
+
+// CopyObjectsToContainer copies objects (files, directories) from a local storage to a container
+// objectToCopy is a map where keys are local storage path and values are container paths
+func (c *ShellClient) CopyObjectsToContainer(containerName string, objectsToCopy map[string]string) error {
+
+	// copy objects
+	for objectLocalPath, objectContainerPath := range objectsToCopy {
+
+		// create target directory if it doesn't exist
+		fileDir := path.Dir(objectContainerPath)
+
+		// escape all paths (security matter)
+		escapedObjectLocalPath := common.Quote(objectLocalPath)
+		escapedObjectContainerPath := common.Quote(objectContainerPath)
+		escapedFileDir := common.Quote(fileDir)
+
+		if _, err := c.runCommand(nil, "docker exec %s mkdir -p %s", containerName, escapedFileDir); err != nil {
+			return errors.Wrapf(err, "Failed creating directory in container")
+		}
+
+		// copy an object from local storage to the given container
+		if _, err := c.runCommand(nil,
+			"docker cp %s %s:%s ",
+			escapedObjectLocalPath,
+			containerName,
+			escapedObjectContainerPath); err != nil {
+			return errors.Wrapf(err, "Failed copying object %s to container %s:%s", escapedObjectLocalPath, containerName, escapedObjectContainerPath)
 		}
 	}
 
@@ -212,10 +247,13 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 	var dockerArguments []string
 
 	for localPort, dockerPort := range runOptions.Ports {
-		if localPort == RunOptionsNoPort {
-			dockerArguments = append(dockerArguments, fmt.Sprintf("-p %d", dockerPort))
-		} else {
-			dockerArguments = append(dockerArguments, fmt.Sprintf("-p %d:%d", localPort, dockerPort))
+		switch localPort {
+		case RunOptionsRandomPort:
+			dockerArguments = append(dockerArguments, fmt.Sprintf("--publish '%d'", dockerPort))
+		case RunOptionsNoPort:
+			continue
+		default:
+			dockerArguments = append(dockerArguments, fmt.Sprintf("--publish '%d:%d'", localPort, dockerPort))
 		}
 	}
 
@@ -228,19 +266,27 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 			return "", errors.Errorf("Cannot combine restart policy with container removal")
 		}
 		restartMaxRetries := runOptions.RestartPolicy.MaximumRetryCount
-		restartPolicy := fmt.Sprintf("--restart %s", runOptions.RestartPolicy.Name)
+		restartPolicy := string(runOptions.RestartPolicy.Name)
 		if runOptions.RestartPolicy.Name == RestartPolicyNameOnFailure && restartMaxRetries >= 0 {
 			restartPolicy += fmt.Sprintf(":%d", restartMaxRetries)
 		}
-		dockerArguments = append(dockerArguments, restartPolicy)
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--restart %s", common.Quote(restartPolicy)))
 	}
 
 	if !runOptions.Attach {
-		dockerArguments = append(dockerArguments, "-d")
+		dockerArguments = append(dockerArguments, "--detach")
 	}
 
 	if runOptions.GPUs != "" {
-		dockerArguments = append(dockerArguments, fmt.Sprintf("--gpus %s", runOptions.GPUs))
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--gpus %s", common.Quote(runOptions.GPUs)))
+	}
+
+	if runOptions.Memory != "" {
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--memory %s", runOptions.Memory))
+	}
+
+	if runOptions.CPUs != "" {
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--cpus %s", runOptions.CPUs))
 	}
 
 	if runOptions.Remove {
@@ -248,30 +294,30 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 	}
 
 	if runOptions.ContainerName != "" {
-		dockerArguments = append(dockerArguments, fmt.Sprintf("--name %s", runOptions.ContainerName))
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--name %s", common.Quote(runOptions.ContainerName)))
 	}
 
 	if runOptions.Network != "" {
-		dockerArguments = append(dockerArguments, fmt.Sprintf("--net %s", runOptions.Network))
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--net %s", common.Quote(runOptions.Network)))
 	}
 
 	if runOptions.Labels != nil {
 		for labelName, labelValue := range runOptions.Labels {
 			dockerArguments = append(dockerArguments,
-				fmt.Sprintf("--label %s='%s'", labelName, c.replaceSingleQuotes(labelValue)))
+				fmt.Sprintf("--label '%s'='%s'", labelName, c.replaceSingleQuotes(labelValue)))
 		}
 	}
 
 	if runOptions.Env != nil {
 		for envName, envValue := range runOptions.Env {
-			dockerArguments = append(dockerArguments, fmt.Sprintf("--env %s='%s'", envName, envValue))
+			dockerArguments = append(dockerArguments, fmt.Sprintf("--env '%s'='%s'", envName, envValue))
 		}
 	}
 
 	if runOptions.Volumes != nil {
 		for volumeHostPath, volumeContainerPath := range runOptions.Volumes {
 			dockerArguments = append(dockerArguments,
-				fmt.Sprintf("--volume %s:%s ", volumeHostPath, volumeContainerPath))
+				fmt.Sprintf("--volume '%s:%s'", volumeHostPath, volumeContainerPath))
 		}
 	}
 
@@ -287,13 +333,18 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 			if !mountPoint.RW {
 				readonly = ",readonly"
 			}
+			mount := fmt.Sprintf("%ssource=%s,destination=%s%s",
+				mountType,
+				mountPoint.Source,
+				mountPoint.Destination,
+				readonly)
 			dockerArguments = append(dockerArguments,
-				fmt.Sprintf("--mount %ssource=%s,destination=%s%s",
-					mountType,
-					mountPoint.Source,
-					mountPoint.Destination,
-					readonly))
+				fmt.Sprintf("--mount %s", common.Quote(mount)))
 		}
+	}
+
+	for _, device := range runOptions.Devices {
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--device %s", common.Quote(device)))
 	}
 
 	if runOptions.RunAsUser != nil || runOptions.RunAsGroup != nil {
@@ -305,11 +356,11 @@ func (c *ShellClient) RunContainer(imageName string, runOptions *RunOptions) (st
 			userStr += fmt.Sprintf(":%d", *runOptions.RunAsGroup)
 		}
 
-		dockerArguments = append(dockerArguments, fmt.Sprintf("--user %s", userStr))
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--user %s", common.Quote(userStr)))
 	}
 
 	if runOptions.FSGroup != nil {
-		dockerArguments = append(dockerArguments, fmt.Sprintf("--group-add %d", *runOptions.FSGroup))
+		dockerArguments = append(dockerArguments, fmt.Sprintf("--group-add '%d'", *runOptions.FSGroup))
 	}
 
 	runResult, err := c.cmdRunner.Run(
@@ -747,7 +798,11 @@ func (c *ShellClient) CreateVolume(options *CreateVolumeOptions) error {
 func (c *ShellClient) DeleteVolume(volumeName string) error {
 	c.logger.DebugWith("Deleting docker volume", "volumeName", volumeName)
 	if !volumeNameRegex.MatchString(volumeName) {
-		return errors.New("Invalid volume name to delete")
+		// if a name doesn't match regexp, volume was not created in the first place,
+		// so we don't want to fail in that case, just do nothing
+		c.logger.WarnWith("Failed to validate volume name, deletion of volume was skipped",
+			"volumeName", volumeName)
+		return nil
 	}
 
 	_, err := c.runCommand(nil, `docker volume rm --force %s`, volumeName)
@@ -956,16 +1011,16 @@ func (c *ShellClient) build(buildOptions *BuildOptions, buildArgs string) error 
 	common.RetryUntilSuccessfulOnErrorPatterns(c.buildTimeout, // nolint: errcheck
 		c.buildRetryInterval,
 		retryOnErrorMessages,
-		func() string {
-			runResults, err := c.runCommand(runOptions, buildCommand)
+		func(int) (string, error) {
+			runResults, err := c.runCommand(runOptions, "%s", buildCommand)
 
 			// preserve error
 			lastBuildErr = err
 
 			if err != nil {
-				return runResults.Stderr
+				return runResults.Stderr, err
 			}
-			return ""
+			return "", err
 		})
 	return lastBuildErr
 }
@@ -990,7 +1045,7 @@ func (c *ShellClient) createContainer(imageName string) (string, error) {
 	common.RetryUntilSuccessfulOnErrorPatterns(10*time.Second, // nolint: errcheck
 		2*time.Second,
 		retryOnErrorMessages,
-		func() string {
+		func(int) (string, error) {
 
 			// create container from image
 			runResults, err := c.runCommand(nil, "docker create %s /bin/sh", imageName)
@@ -999,11 +1054,11 @@ func (c *ShellClient) createContainer(imageName string) (string, error) {
 			lastCreateContainerError = err
 
 			if err != nil {
-				return runResults.Stderr
+				return runResults.Stderr, err
 			}
 			containerID = runResults.Output
 			containerID = strings.TrimSpace(containerID)
-			return ""
+			return "", err
 		})
 
 	return containerID, lastCreateContainerError

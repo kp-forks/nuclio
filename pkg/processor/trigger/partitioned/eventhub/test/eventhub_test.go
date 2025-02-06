@@ -1,7 +1,7 @@
 //go:build test_integration && test_iguazio
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -84,7 +84,8 @@ func (suite *testSuite) TestReceiveRecords() {
 		createFunctionOptions,
 		map[string]triggertest.TopicMessages{"": {NumMessages: 3}},
 		nil,
-		suite.publishMessageToTopic)
+		suite.publishMessageToTopic,
+		nil)
 }
 
 func (suite *testSuite) publishMessageToTopic(topic string, body string) error {

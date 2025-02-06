@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,12 +19,14 @@ limitations under the License.
 package httpsuite
 
 import (
+	"encoding/base64"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/platform"
 
@@ -68,7 +70,7 @@ func (suite *HTTPTestSuite) TestCORS() {
 				RequestHeaders: map[string]interface{}{
 					"Origin":                         origin,
 					"Access-Control-Request-Method":  http.MethodPost,
-					"Access-Control-Request-Headers": "X-nuclio-log-level",
+					"Access-Control-Request-Headers": headers.LogLevel,
 				},
 				ExpectedResponseStatusCode: &validPreflightResponseStatusCode,
 				ExpectedResponseHeadersValues: map[string][]string{
@@ -139,6 +141,78 @@ func (suite *HTTPTestSuite) TestMaxRequestBodySize() {
 				ExpectedResponseStatusCode: &statusBadRequest,
 			},
 		})
+}
+
+func (suite *HTTPTestSuite) TestProcessErrorResponse() {
+
+	// create a function which returns a faulty content type in the response
+	functionSourceCode := `import nuclio_sdk
+
+def handler(context, event):
+	return nuclio_sdk.Response(
+		body=str(123),
+		headers={},
+		content_type=123,
+		status_code=200,
+	)
+`
+	createFunctionOptions := suite.getHTTPDeployOptions()
+	createFunctionOptions.FunctionConfig.Spec.Handler = "main:handler"
+	createFunctionOptions.FunctionConfig.Spec.Build.Path = ""
+	createFunctionOptions.FunctionConfig.Spec.Build.FunctionSourceCode = base64.StdEncoding.EncodeToString([]byte(functionSourceCode))
+
+	statusInternalServerError := http.StatusInternalServerError
+	suite.DeployFunctionAndRequests(createFunctionOptions,
+		[]*Request{
+			{
+				RequestMethod:              "GET",
+				ExpectedResponseStatusCode: &statusInternalServerError,
+				ExpectedResponseBody:       "json: cannot unmarshal number into Go struct field Result.content_type of type string",
+			},
+		})
+}
+
+func (suite *HTTPTestSuite) TestBatchedProcessing() {
+	functionName := "batch-function"
+	functionPath := path.Join(suite.GetTestFunctionsDir(),
+		"python",
+		"batch",
+		"batch-http-func.py")
+	createFunctionOptions := suite.GetDeployOptions("event_recorder",
+		suite.GetFunctionPath(path.Join("event_recorder_python")))
+
+	createFunctionOptions.FunctionConfig.Spec.Runtime = "python"
+	createFunctionOptions.FunctionConfig.Meta.Name = functionName
+	createFunctionOptions.FunctionConfig.Spec.Build.Path = functionPath
+	createFunctionOptions.FunctionConfig.Spec.Triggers = map[string]functionconfig.Trigger{
+		suite.triggerName: {
+			Kind:       "http",
+			Attributes: map[string]interface{}{},
+			Batch: &functionconfig.BatchConfiguration{
+				Mode:      functionconfig.BatchModeEnable,
+				BatchSize: 2,
+				Timeout:   "1ms",
+			},
+		},
+	}
+	statusOK := fasthttp.StatusOK
+	suite.DeployFunctionAndRequests(createFunctionOptions,
+		[]*Request{
+			// Happy flows
+			{
+				RequestMethod:              "POST",
+				RequestBody:                "hello-0",
+				ExpectedResponseStatusCode: &statusOK,
+				ExpectedResponseBody:       "Response to in-batch event",
+			},
+			{
+				RequestMethod:              "POST",
+				RequestBody:                "hello-1",
+				ExpectedResponseStatusCode: &statusOK,
+				ExpectedResponseBody:       "Response to in-batch event",
+			},
+		})
+
 }
 
 func (suite *HTTPTestSuite) getHTTPDeployOptions() *platform.CreateFunctionOptions {

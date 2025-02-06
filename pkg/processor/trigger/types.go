@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,9 +24,11 @@ import (
 
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
+	"github.com/nuclio/nuclio/pkg/processor/util/partitionworker"
 	"github.com/nuclio/nuclio/pkg/processor/worker"
 
 	"github.com/nuclio/errors"
+	"github.com/nuclio/logger"
 )
 
 type DurationConfigField struct {
@@ -46,7 +48,7 @@ type AnnotationConfigField struct {
 }
 
 type Configuration struct {
-	functionconfig.Trigger
+	*functionconfig.Trigger
 
 	// the runtime configuration, for reference
 	RuntimeConfiguration *runtime.Configuration
@@ -57,20 +59,30 @@ type Configuration struct {
 
 func NewConfiguration(id string,
 	triggerConfiguration *functionconfig.Trigger,
-	runtimeConfiguration *runtime.Configuration) *Configuration {
+	runtimeConfiguration *runtime.Configuration) (*Configuration, error) {
 
 	configuration := &Configuration{
-		Trigger:              *triggerConfiguration,
+		Trigger:              triggerConfiguration,
 		RuntimeConfiguration: runtimeConfiguration,
 		ID:                   id,
 	}
 
 	// set defaults
-	if configuration.MaxWorkers == 0 {
-		configuration.MaxWorkers = 1
+	if configuration.NumWorkers == 0 {
+		configuration.NumWorkers = 1
 	}
 
-	return configuration
+	if triggerConfiguration.WorkerTerminationTimeout == "" {
+		triggerConfiguration.WorkerTerminationTimeout = functionconfig.DefaultWorkerTerminationTimeout
+	}
+
+	workerTerminationTimeout, err := time.ParseDuration(triggerConfiguration.WorkerTerminationTimeout)
+	if err != nil {
+		return nil, errors.New("Failed to parse worker termination timeout from trigger configuration")
+	}
+	runtimeConfiguration.WorkerTerminationTimeout = workerTerminationTimeout
+
+	return configuration, nil
 }
 
 // PopulateConfigurationFromAnnotations allows setting configuration via annotations, for experimental settings
@@ -124,6 +136,48 @@ func (c *Configuration) ParseDurationOrDefault(durationConfigField *DurationConf
 	*durationConfigField.Field = parsedDurationValue
 
 	return nil
+}
+
+func (c *Configuration) PopulateExplicitAckMode(logger logger.Logger, explicitAckModeValue string,
+	triggerConfigurationExplicitAckMode functionconfig.ExplicitAckMode) error {
+	switch explicitAckModeValue {
+	case string(functionconfig.ExplicitAckModeEnable):
+		c.ExplicitAckMode = functionconfig.ExplicitAckModeEnable
+	case string(functionconfig.ExplicitAckModeExplicitOnly):
+		c.ExplicitAckMode = functionconfig.ExplicitAckModeExplicitOnly
+	default:
+
+		// default explicit ack mode to 'disable' if not set
+		if triggerConfigurationExplicitAckMode != "" {
+			c.ExplicitAckMode = triggerConfigurationExplicitAckMode
+		} else {
+			c.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+		}
+	}
+
+	if c.ExplicitAckMode != functionconfig.ExplicitAckModeDisable {
+		if !functionconfig.RuntimeSupportExplicitAck(c.RuntimeConfiguration.Config.Spec.Runtime) {
+			logger.WarnWith("Explicit Ack is not supported for the configured runtime. "+
+				"Setting explicitAck mode to `disable`",
+				"runtime", c.RuntimeConfiguration.Config.Spec.Runtime)
+			c.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+		}
+	}
+	return nil
+}
+
+func (c *Configuration) ResolveWorkerAllocationMode(modeFromAttributes, modeFromAnnotation partitionworker.AllocationMode) partitionworker.AllocationMode {
+
+	// prioritize attribute over annotation
+	if modeFromAttributes != "" {
+		return modeFromAttributes
+	}
+	if modeFromAnnotation != "" {
+		return modeFromAnnotation
+	}
+
+	// default to pool
+	return partitionworker.AllocationModePool
 }
 
 type Statistics struct {

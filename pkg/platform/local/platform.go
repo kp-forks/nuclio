@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -44,12 +45,14 @@ import (
 	"github.com/nuclio/nuclio/pkg/platform/local/client"
 	"github.com/nuclio/nuclio/pkg/platformconfig"
 	"github.com/nuclio/nuclio/pkg/processor"
+	"github.com/nuclio/nuclio/pkg/processor/trigger/http"
 
-	"github.com/ghodss/yaml"
+	"github.com/mitchellh/mapstructure"
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/nuclio/nuclio-sdk-go"
-	"github.com/nuclio/zap"
+	nucliozap "github.com/nuclio/zap"
+	"sigs.k8s.io/yaml"
 )
 
 type Platform struct {
@@ -58,6 +61,8 @@ type Platform struct {
 	dockerClient   dockerclient.Client
 	localStore     *client.Store
 	projectsClient project.Client
+
+	storeImageName string
 }
 
 const Mib = 1048576
@@ -101,9 +106,18 @@ func NewPlatform(ctx context.Context,
 		return nil, errors.Wrap(err, "Failed to create a command runner")
 	}
 
+	switch runtime.GOARCH {
+	case "arm64":
+		newPlatform.storeImageName = "gcr.io/iguazio/arm64v8/alpine:3.20"
+	case "arm":
+		newPlatform.storeImageName = "gcr.io/iguazio/arm32v7/alpine:3.20"
+	default:
+		newPlatform.storeImageName = "gcr.io/iguazio/alpine:3.20"
+	}
+
 	if newPlatform.ContainerBuilder, err = containerimagebuilderpusher.NewDocker(newPlatform.Logger,
 		platformConfiguration.ContainerBuilderConfiguration); err != nil {
-		return nil, errors.Wrap(err, "Failed to create containerimagebuilderpusher")
+		return nil, errors.Wrap(err, "Failed to create container image builder pusher")
 	}
 
 	// create a docker client
@@ -112,7 +126,10 @@ func NewPlatform(ctx context.Context,
 	}
 
 	// create a local store for configs and stuff
-	if newPlatform.localStore, err = client.NewStore(parentLogger, newPlatform, newPlatform.dockerClient); err != nil {
+	if newPlatform.localStore, err = client.NewStore(parentLogger,
+		newPlatform,
+		newPlatform.dockerClient,
+		newPlatform.storeImageName); err != nil {
 		return nil, errors.Wrap(err, "Failed to create a local store")
 	}
 
@@ -157,7 +174,7 @@ func (p *Platform) CreateFunction(ctx context.Context, createFunctionOptions *pl
 	var err error
 	var existingFunctionConfig *functionconfig.ConfigWithStatus
 
-	if err := p.enrichAndValidateFunctionConfig(ctx, &createFunctionOptions.FunctionConfig); err != nil {
+	if err := p.enrichAndValidateFunctionConfig(ctx, &createFunctionOptions.FunctionConfig, createFunctionOptions.AutofixConfiguration); err != nil {
 		return nil, errors.Wrap(err, "Failed to enrich and validate a function configuration")
 	}
 
@@ -245,7 +262,7 @@ func (p *Platform) CreateFunction(ctx context.Context, createFunctionOptions *pl
 			"name", createFunctionOptions.FunctionConfig.Meta.Name)
 
 		// enrich and validate again because it may not be valid after config was updated by external code entry type
-		if err := p.enrichAndValidateFunctionConfig(ctx, &createFunctionOptions.FunctionConfig); err != nil {
+		if err := p.enrichAndValidateFunctionConfig(ctx, &createFunctionOptions.FunctionConfig, createFunctionOptions.AutofixConfiguration); err != nil {
 			return errors.Wrap(err, "Failed to enrich and validate the updated function configuration")
 		}
 
@@ -269,6 +286,7 @@ func (p *Platform) CreateFunction(ctx context.Context, createFunctionOptions *pl
 
 	onAfterBuild := func(buildResult *platform.CreateFunctionBuildResult, buildErr error) (*platform.CreateFunctionResult, error) {
 		if buildErr != nil {
+			// if an error occurs during building of the function image, the function state should be set to `error`
 			reportCreationError(buildErr) // nolint: errcheck
 			return nil, buildErr
 		}
@@ -336,7 +354,7 @@ func (p *Platform) CreateFunction(ctx context.Context, createFunctionOptions *pl
 		}
 	}
 
-	// wrap the deployer's deploy with the base HandleDeployFunction to provide lots of
+	// wrap the deployer's `deploy` with the base HandleDeployFunction to provide lots of
 	// common functionality
 	return p.HandleDeployFunction(ctx, existingFunctionConfig, createFunctionOptions, onAfterConfigUpdated, onAfterBuild)
 }
@@ -393,6 +411,88 @@ func (p *Platform) DeleteFunction(ctx context.Context, deleteFunctionOptions *pl
 	return p.delete(ctx, deleteFunctionOptions)
 }
 
+func (p *Platform) RedeployFunction(ctx context.Context, redeployFunctionOptions *platform.RedeployFunctionOptions) error {
+
+	// Check OPA permissions
+	permissionOptions := redeployFunctionOptions.PermissionOptions
+	permissionOptions.RaiseForbidden = true
+	if _, err := p.QueryOPAFunctionRedeployPermissions(
+		redeployFunctionOptions.FunctionMeta.Labels[common.NuclioResourceLabelKeyProjectName],
+		redeployFunctionOptions.FunctionMeta.Name,
+		&permissionOptions); err != nil {
+		return errors.Wrap(err, "Failed authorizing OPA permissions for resource")
+	}
+
+	p.Logger.InfoWithCtx(ctx,
+		"Redeploying function",
+		"functionName", redeployFunctionOptions.FunctionMeta.Name)
+
+	// delete existing function containers
+	previousHTTPPort, err := p.deleteOrStopFunctionContainers(&platform.CreateFunctionOptions{
+		Logger: p.Logger,
+		FunctionConfig: functionconfig.Config{
+			Meta: *redeployFunctionOptions.FunctionMeta,
+			Spec: *redeployFunctionOptions.FunctionSpec,
+		},
+	})
+	if err != nil {
+		return errors.Wrap(err, "Failed to delete previous containers")
+	}
+	var functionStatus functionconfig.Status
+
+	reportRedeployError := func(creationError error) error {
+		p.Logger.WarnWithCtx(ctx,
+			"Failed to redeploy function; setting the function status",
+			"functionName", redeployFunctionOptions.FunctionMeta.Name,
+			"err", creationError)
+
+		errorStack := bytes.Buffer{}
+		errors.PrintErrorStack(&errorStack, creationError, 20)
+
+		// cut messages that are too big
+		if errorStack.Len() >= 4*Mib {
+			errorStack.Truncate(4 * Mib)
+		}
+
+		// post logs and error
+		return p.localStore.CreateOrUpdateFunction(&functionconfig.ConfigWithStatus{
+			Config: functionconfig.Config{
+				Meta: *redeployFunctionOptions.FunctionMeta,
+				Spec: *redeployFunctionOptions.FunctionSpec,
+			},
+			Status: functionconfig.Status{
+				State:   functionconfig.FunctionStateError,
+				Message: errorStack.String(),
+			},
+		})
+	}
+
+	createFunctionResult, deployErr := p.deployFunction(&platform.CreateFunctionOptions{
+		Logger: p.Logger,
+		FunctionConfig: functionconfig.Config{
+			Meta: *redeployFunctionOptions.FunctionMeta,
+			Spec: *redeployFunctionOptions.FunctionSpec,
+		},
+		AuthConfig:                 redeployFunctionOptions.AuthConfig,
+		DependantImagesRegistryURL: redeployFunctionOptions.DependantImagesRegistryURL,
+		AuthSession:                redeployFunctionOptions.AuthSession,
+		PermissionOptions:          redeployFunctionOptions.PermissionOptions,
+	}, previousHTTPPort)
+	if deployErr != nil {
+		reportRedeployError(deployErr) // nolint: errcheck
+		return deployErr
+	}
+
+	functionStatus.HTTPPort = createFunctionResult.Port
+	functionStatus.State = functionconfig.FunctionStateReady
+
+	if err := p.populateFunctionInvocationStatus(&functionStatus, createFunctionResult); err != nil {
+		return errors.Wrap(err, "Failed to populate function invocation status")
+	}
+
+	return nil
+}
+
 func (p *Platform) GetFunctionReplicaLogsStream(ctx context.Context,
 	options *platform.GetFunctionReplicaLogsStreamOptions) (io.ReadCloser, error) {
 
@@ -416,7 +516,13 @@ func (p *Platform) GetFunctionReplicaLogsStream(ctx context.Context,
 }
 
 func (p *Platform) GetFunctionReplicaNames(ctx context.Context,
-	functionConfig *functionconfig.Config) ([]string, error) {
+	function platform.Function, permissionOptions opa.PermissionOptions) ([]string, error) {
+	return []string{
+		p.GetFunctionContainerName(function.GetConfig()),
+	}, nil
+}
+
+func (p *Platform) GetFunctionReplicaContainers(ctx context.Context, functionConfig *functionconfig.Config, replicaName string) ([]string, error) {
 	return []string{
 		p.GetFunctionContainerName(functionConfig),
 	}, nil
@@ -583,6 +689,14 @@ func (p *Platform) DeleteFunctionEvent(ctx context.Context, deleteFunctionEventO
 	return p.localStore.DeleteFunctionEvent(&deleteFunctionEventOptions.Meta)
 }
 
+func (p *Platform) GetFunctionScrubber() *functionconfig.Scrubber {
+	return nil
+}
+
+func (p *Platform) GetAPIGatewayScrubber() *platform.APIGatewayScrubber {
+	return nil
+}
+
 // GetFunctionEvents will list existing function events
 func (p *Platform) GetFunctionEvents(ctx context.Context, getFunctionEventsOptions *platform.GetFunctionEventsOptions) ([]platform.FunctionEvent, error) {
 	functionEvents, err := p.localStore.GetFunctionEvents(getFunctionEventsOptions)
@@ -730,8 +844,7 @@ func (p *Platform) ValidateFunctionContainersHealthiness(ctx context.Context) {
 					functionconfig.FunctionStateError,
 					functionconfig.FunctionStateUnhealthy,
 				}) && functionStatus.Message == string(common.FunctionStateMessageUnhealthy)
-
-			if !(functionIsReady || functionWasSetAsUnhealthy) {
+			if !(functionIsReady || functionWasSetAsUnhealthy) || functionConfig.Spec.Disable {
 
 				// cannot be monitored
 				continue
@@ -807,15 +920,8 @@ func (p *Platform) GetFunctionVolumeMountName(functionConfig *functionconfig.Con
 		functionConfig.Meta.Name)
 }
 
-// GetFunctionSecrets returns all the function's secrets
-func (p *Platform) GetFunctionSecrets(ctx context.Context, functionName, functionNamespace string) ([]platform.FunctionSecret, error) {
-
-	// TODO: implement function secrets on local platform
-	return nil, nil
-}
-
-func (p *Platform) GetFunctionSecretData(ctx context.Context, functionName, functionNamespace string) (map[string][]byte, error) {
-	return nil, nil
+func (p *Platform) InitializeContainerBuilder() error {
+	return nil
 }
 
 func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunctionOptions,
@@ -853,6 +959,9 @@ func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunction
 		gpus = "all"
 	}
 
+	cpus := p.resolveFunctionSpecRequestCPUs(createFunctionOptions.FunctionConfig.Spec)
+	memory := p.resolveFunctionSpecRequestMemory(createFunctionOptions.FunctionConfig.Spec)
+
 	functionSecurityContext := createFunctionOptions.FunctionConfig.Spec.SecurityContext
 
 	// run the docker image
@@ -866,10 +975,13 @@ func (p *Platform) deployFunction(createFunctionOptions *platform.CreateFunction
 		Network:       network,
 		RestartPolicy: restartPolicy,
 		GPUs:          gpus,
+		CPUs:          cpus,
+		Memory:        memory,
 		MountPoints:   mountPoints,
 		RunAsUser:     functionSecurityContext.RunAsUser,
 		RunAsGroup:    functionSecurityContext.RunAsGroup,
 		FSGroup:       functionSecurityContext.FSGroup,
+		Devices:       createFunctionOptions.FunctionConfig.Spec.Devices,
 	}
 
 	containerID := p.GetFunctionContainerName(&createFunctionOptions.FunctionConfig)
@@ -905,7 +1017,7 @@ func (p *Platform) delete(ctx context.Context, deleteFunctionOptions *platform.D
 
 	// delete the function from the local store
 	if err := p.localStore.DeleteFunction(ctx, &deleteFunctionOptions.FunctionConfig.Meta); err != nil &&
-		err != nuclio.ErrNotFound {
+		!errors.Is(err, nuclio.ErrNotFound) {
 		p.Logger.WarnWithCtx(ctx, "Failed to delete a function from the local store", "err", err.Error())
 	}
 
@@ -999,6 +1111,11 @@ func (p *Platform) getFunctionHTTPPort(createFunctionOptions *platform.CreateFun
 		return createFunctionOptions.FunctionConfig.Spec.GetHTTPPort(), nil
 	}
 
+	// check http trigger annotations for avoiding port publishing
+	if p.disablePortPublishing(createFunctionOptions) {
+		return dockerclient.RunOptionsNoPort, nil
+	}
+
 	// if there was a previous deployment and no configuration - use that
 	if previousHTTPPort != 0 {
 		createFunctionOptions.Logger.DebugWith("Using previous deployment HTTP port ",
@@ -1006,7 +1123,37 @@ func (p *Platform) getFunctionHTTPPort(createFunctionOptions *platform.CreateFun
 		return previousHTTPPort, nil
 	}
 
-	return dockerclient.RunOptionsNoPort, nil
+	return dockerclient.RunOptionsRandomPort, nil
+}
+
+func (p *Platform) disablePortPublishing(createFunctionOptions *platform.CreateFunctionOptions) bool {
+
+	// iterate over triggers and check if there is a http trigger with disable port publishing
+	for _, trigger := range createFunctionOptions.FunctionConfig.Spec.Triggers {
+		if trigger.Kind == "http" {
+			triggerAttributes := http.Configuration{}
+
+			// parse attributes
+			if err := mapstructure.Decode(trigger.Attributes, &triggerAttributes); err != nil {
+				p.Logger.WarnWith("Failed to decode trigger attributes", "err", err.Error())
+				return false
+			}
+
+			if triggerAttributes.DisablePortPublishing {
+				return true
+			}
+
+			// since this feature is not exposed in the UI for local platform, we also check trigger annotations
+			// to determine whether to expose the function on the host network or not
+			if annotations := trigger.Annotations; annotations != nil {
+				if disable, ok := annotations["nuclio.io/disable-port-publishing"]; ok && disable == "true" {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func (p *Platform) resolveDeployedFunctionHTTPPort(containerID string) (int, error) {
@@ -1188,7 +1335,7 @@ func (p *Platform) prepareFunctionVolumeMount(createFunctionOptions *platform.Cr
 	}
 
 	// dumping contents to volume's processor path
-	if _, err := p.dockerClient.RunContainer("gcr.io/iguazio/alpine:3.15",
+	if _, err := p.dockerClient.RunContainer(p.storeImageName,
 		&dockerclient.RunOptions{
 			Remove:           true,
 			ImageMayNotExist: true,
@@ -1235,7 +1382,7 @@ func (p *Platform) compileDeployFunctionLabels(createFunctionOptions *platform.C
 	return labels
 }
 
-func (p *Platform) enrichAndValidateFunctionConfig(ctx context.Context, functionConfig *functionconfig.Config) error {
+func (p *Platform) enrichAndValidateFunctionConfig(ctx context.Context, functionConfig *functionconfig.Config, autofix bool) error {
 	if len(functionConfig.Spec.Volumes) == 0 {
 		functionConfig.Spec.Volumes = p.Config.Local.DefaultFunctionVolumes
 	}
@@ -1244,11 +1391,7 @@ func (p *Platform) enrichAndValidateFunctionConfig(ctx context.Context, function
 		return errors.Wrap(err, "Failed to enrich a function configuration")
 	}
 
-	if err := p.ValidateFunctionConfig(ctx, functionConfig); err != nil {
-		return errors.Wrap(err, "Failed to validate a function configuration")
-	}
-
-	return nil
+	return p.Platform.ValidateFunctionConfigWithRetry(ctx, functionConfig, autofix)
 }
 
 func (p *Platform) populateFunctionInvocationStatus(functionInvocation *functionconfig.Status,
@@ -1322,4 +1465,28 @@ func (p *Platform) resolveFunctionRestartPolicy(createFunctionOptions *platform.
 	}
 
 	return p.Config.Local.DefaultFunctionRestartPolicy, nil
+}
+
+func (p *Platform) resolveFunctionSpecRequestCPUs(functionSpec functionconfig.Spec) string {
+	if functionSpec.Resources.Limits.Cpu().MilliValue() > 0 {
+
+		// format float to string, trim trailing zeros (e.g.: 0.100000 -> 0.1)
+		cpus := strings.TrimRight(
+			fmt.Sprintf("%f", functionSpec.Resources.Limits.Cpu().AsApproximateFloat64()),
+			"0")
+		if strings.HasSuffix(cpus, ".") {
+			cpus += "0"
+		}
+		return cpus
+	}
+	return ""
+}
+
+func (p *Platform) resolveFunctionSpecRequestMemory(functionSpec functionconfig.Spec) string {
+	if functionSpec.Resources.Limits.Memory().Value() > 0 {
+		return fmt.Sprintf("%db",
+			functionSpec.Resources.Limits.Memory().Value(),
+		)
+	}
+	return ""
 }

@@ -1,4 +1,4 @@
-# API Gateway
+# API Gateway with HTTP
 
 #### In This Section
 
@@ -8,6 +8,7 @@
 - [Basic Authentication](#basic-auth)
     - [Create](#create-basic)
     - [Invoke](#invoke-basic)
+- [Delete an API Gateway](#delete)
 - [Canary Function](#canary-function)
 
 <a id="none-auth"></a>
@@ -104,7 +105,7 @@ With the following request body:
 ```
 
 <a id="invoke-basic"></a>
-### Invoke API gateways
+### Invoke API gateways with basic authentication
 
 To invoke it, simply send a request to the created API Gateway ingress (e.g.: `<apigateway-name>-<project-name>.<nuclio-host-name>`,
 specified on the request body `spec.host`) with the following header:
@@ -128,6 +129,24 @@ Authorization: Basic c29tZS11c2VybmFtZTpzb21lLXBhc3N3b3Jk
 ```
 
 Invoking the function without the above header results in `401 Authorization Required`
+
+<a id="delete"></a>
+## Delete an API Gateway
+
+To delete an API gateway, send a DELETE request to the following endpoint:
+
+```
+<nuclio-host-name>/api/api_gateways
+```
+With a request body specifying the name of the API gateway to delete:
+```json
+{
+    "metadata":{
+        "name": "<apigateway-name>"
+    }
+}
+```
+Response status code: 204 (No content).
 
 <a id="canary-function"></a>
 ## Canary function

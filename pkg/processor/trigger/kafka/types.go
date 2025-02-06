@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,13 @@ limitations under the License.
 package kafka
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nuclio/nuclio/pkg/common"
 	"github.com/nuclio/nuclio/pkg/functionconfig"
 	"github.com/nuclio/nuclio/pkg/processor/runtime"
 	"github.com/nuclio/nuclio/pkg/processor/trigger"
@@ -42,7 +45,7 @@ type Configuration struct {
 	BalanceStrategy string
 	SASL            struct {
 		Enable    bool
-		Handshake bool
+		Handshake *bool
 		User      string
 		Password  string
 		Mechanism string
@@ -59,7 +62,10 @@ type Configuration struct {
 	TLS struct {
 		Enable             bool
 		InsecureSkipVerify bool
+		MinimumVersion     string
 	}
+
+	SecretPath string
 
 	SessionTimeout                string
 	HeartbeatInterval             string
@@ -83,18 +89,19 @@ type Configuration struct {
 	Version                       string
 
 	// resolved fields
-	brokers                       []string
-	initialOffset                 int64
-	balanceStrategy               sarama.BalanceStrategy
-	sessionTimeout                time.Duration
-	heartbeatInterval             time.Duration
-	maxProcessingTime             time.Duration
-	rebalanceTimeout              time.Duration
-	rebalanceRetryBackoff         time.Duration
-	retryBackoff                  time.Duration
-	maxWaitTime                   time.Duration
-	maxWaitHandlerDuringRebalance time.Duration
-	ackWindowSize                 int
+	brokers                               []string
+	initialOffset                         int64
+	balanceStrategy                       sarama.BalanceStrategy
+	sessionTimeout                        time.Duration
+	heartbeatInterval                     time.Duration
+	maxProcessingTime                     time.Duration
+	rebalanceTimeout                      time.Duration
+	rebalanceRetryBackoff                 time.Duration
+	retryBackoff                          time.Duration
+	maxWaitTime                           time.Duration
+	maxWaitHandlerDuringRebalance         time.Duration
+	waitExplicitAckDuringRebalanceTimeout time.Duration
+	ackWindowSize                         int
 }
 
 func NewConfiguration(id string,
@@ -104,11 +111,16 @@ func NewConfiguration(id string,
 	newConfiguration := Configuration{}
 
 	// create base
-	newConfiguration.Configuration = *trigger.NewConfiguration(id, triggerConfiguration, runtimeConfiguration)
+	baseConfiguration, err := trigger.NewConfiguration(id, triggerConfiguration, runtimeConfiguration)
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to create trigger configuration")
+	}
+	newConfiguration.Configuration = *baseConfiguration
 
 	workerAllocationModeValue := ""
+	explicitAckModeValue := ""
 
-	err := newConfiguration.PopulateConfigurationFromAnnotations([]trigger.AnnotationConfigField{
+	err = newConfiguration.PopulateConfigurationFromAnnotations([]trigger.AnnotationConfigField{
 		{Key: "nuclio.io/kafka-session-timeout", ValueString: &newConfiguration.SessionTimeout},
 		{Key: "nuclio.io/kafka-heartbeat-interval", ValueString: &newConfiguration.HeartbeatInterval},
 		{Key: "nuclio.io/kafka-max-processing-time", ValueString: &newConfiguration.MaxProcessingTime},
@@ -128,20 +140,22 @@ func NewConfiguration(id string,
 		{Key: "nuclio.io/kafka-access-cert", ValueString: &newConfiguration.AccessCertificate},
 		{Key: "nuclio.io/kafka-ca-cert", ValueString: &newConfiguration.CACert},
 		{Key: "nuclio.io/kafka-version", ValueString: &newConfiguration.Version},
+		{Key: "nuclio.io/kafka-secret-path", ValueString: &newConfiguration.SecretPath},
 
-		// deprecated. not in use anymore.
+		// use this to enable development logs
 		{Key: "nuclio.io/kafka-log-level", ValueInt: &newConfiguration.LogLevel},
 
 		// tls
 		{Key: "nuclio.io/kafka-tls-enabled", ValueBool: &newConfiguration.TLS.Enable},
 		{Key: "nuclio.io/kafka-tls-insecure-skip-verify", ValueBool: &newConfiguration.TLS.InsecureSkipVerify},
+		{Key: "nuclio.io/kafka-tls-minimum-version", ValueString: &newConfiguration.TLS.MinimumVersion},
 
 		// sasl
 		{Key: "nuclio.io/kafka-sasl-enabled", ValueBool: &newConfiguration.SASL.Enable},
 		{Key: "nuclio.io/kafka-sasl-user", ValueString: &newConfiguration.SASL.User},
 		{Key: "nuclio.io/kafka-sasl-password", ValueString: &newConfiguration.SASL.Password},
 		{Key: "nuclio.io/kafka-sasl-mechanism", ValueString: &newConfiguration.SASL.Mechanism},
-		{Key: "nuclio.io/kafka-sasl-handshake", ValueBool: &newConfiguration.SASL.Handshake},
+		{Key: "nuclio.io/kafka-sasl-handshake", ValueBool: newConfiguration.SASL.Handshake},
 
 		// sasl.oauth
 		{Key: "nuclio.io/kafka-sasl-oauth-client-id", ValueString: &newConfiguration.SASL.OAuth.ClientID},
@@ -154,23 +168,27 @@ func NewConfiguration(id string,
 
 		// for backwards-compatibility
 		{Key: "custom.nuclio.io/kafka-window-size", ValueInt: &newConfiguration.ackWindowSize},
+
+		// allow changing explicit ack mode via annotation
+		{Key: "nuclio.io/kafka-explicit-ack-mode", ValueString: &explicitAckModeValue},
+
+		// allow changing explicit ack mode via annotation
+		{Key: "nuclio.io/wait-explicit-ack-during-rebalance-timeout", ValueString: &triggerConfiguration.WaitExplicitAckDuringRebalanceTimeout},
 	})
 
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to populate configuration from annotations")
 	}
 
-	newConfiguration.WorkerAllocationMode = partitionworker.AllocationMode(workerAllocationModeValue)
-
-	// default explicit ack mode to 'disable'
-	if triggerConfiguration.ExplicitAckMode == "" {
-		newConfiguration.ExplicitAckMode = functionconfig.ExplicitAckModeDisable
+	if err := newConfiguration.populateValuesFromMountedSecrets(logger); err != nil {
+		return nil, errors.Wrap(err, "Failed to populate configuration from secrets")
 	}
 
-	// explicit ack is only allowed for Static Allocation mode
-	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
-		functionconfig.ExplicitAckEnabled(triggerConfiguration.ExplicitAckMode) {
-		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
+	if err := newConfiguration.PopulateExplicitAckMode(
+		logger,
+		explicitAckModeValue,
+		triggerConfiguration.ExplicitAckMode); err != nil {
+		return nil, errors.Wrap(err, "Failed to populate explicit ack mode")
 	}
 
 	if ackWindowSizeInterface, ok := newConfiguration.Attributes["ackWindowSize"]; ok {
@@ -204,8 +222,8 @@ func NewConfiguration(id string,
 	}
 
 	// set default
-	if triggerConfiguration.MaxWorkers == 0 {
-		triggerConfiguration.MaxWorkers = 32
+	if triggerConfiguration.NumWorkers == 0 {
+		triggerConfiguration.NumWorkers = 32
 	}
 
 	// parse attributes
@@ -285,31 +303,30 @@ func NewConfiguration(id string,
 			Field:   &newConfiguration.maxWaitHandlerDuringRebalance,
 			Default: 5 * time.Second,
 		},
+		{
+			Name:    "wait explicit ack during rebalance timeout",
+			Value:   newConfiguration.WaitExplicitAckDuringRebalanceTimeout,
+			Field:   &newConfiguration.waitExplicitAckDuringRebalanceTimeout,
+			Default: 100 * time.Millisecond,
+		},
 	} {
 		if err = newConfiguration.ParseDurationOrDefault(&durationConfigField); err != nil {
 			return nil, err
 		}
 	}
 
-	if triggerConfiguration.WorkerTerminationTimeout == "" {
-		triggerConfiguration.WorkerTerminationTimeout = functionconfig.DefaultWorkerTerminationTimeout
-	}
-
-	workerTerminationTimeout, err := time.ParseDuration(triggerConfiguration.WorkerTerminationTimeout)
-	if err != nil {
-		return nil, errors.New("Failed to parse worker termination timeout from trigger configuration")
-	}
-
 	// on rebalance, we want to wait the max timeout so the workers can exit gracefully before killing them
-	if newConfiguration.maxWaitHandlerDuringRebalance < workerTerminationTimeout {
-		newConfiguration.maxWaitHandlerDuringRebalance = workerTerminationTimeout + 3*time.Second
+	if newConfiguration.maxWaitHandlerDuringRebalance < runtimeConfiguration.WorkerTerminationTimeout {
+		newConfiguration.maxWaitHandlerDuringRebalance = runtimeConfiguration.WorkerTerminationTimeout + 3*time.Second
 	}
 
-	// enrich runtime configuration with worker termination timeout
-	runtimeConfiguration.WorkerTerminationTimeout = workerTerminationTimeout
+	newConfiguration.WorkerAllocationMode = newConfiguration.ResolveWorkerAllocationMode(newConfiguration.WorkerAllocationMode,
+		partitionworker.AllocationMode(workerAllocationModeValue))
 
-	if newConfiguration.WorkerAllocationMode == "" {
-		newConfiguration.WorkerAllocationMode = partitionworker.AllocationModePool
+	// explicit ack is only allowed for Static Allocation mode
+	if newConfiguration.WorkerAllocationMode != partitionworker.AllocationModeStatic &&
+		functionconfig.ExplicitAckEnabled(newConfiguration.ExplicitAckMode) {
+		return nil, errors.New("Explicit ack mode is not allowed when using worker pool allocation mode")
 	}
 
 	if newConfiguration.RebalanceRetryMax == 0 {
@@ -423,4 +440,37 @@ func (c *Configuration) unflattenCertificate(certificate string) string {
 	}
 
 	return certificate
+}
+
+// populateValuesFromMountedSecrets will populate sensitive configuration fields from mounted secrets, if the field is a path
+func (c *Configuration) populateValuesFromMountedSecrets(logger logger.Logger) error {
+	basePath := ""
+
+	// if secret path is set, use it as the base path for all secrets
+	if c.SecretPath != "" {
+		basePath = c.SecretPath
+	}
+
+	// for each of the sensitive fields, check if it is a path to a file.
+	// if it is, read the file and populate the field with its contents
+	for _, sensitiveField := range []*string{
+		&c.AccessKey,
+		&c.AccessCertificate,
+		&c.CACert,
+		&c.SASL.Password,
+		&c.SASL.OAuth.ClientSecret,
+	} {
+		filePath := filepath.Join(basePath, *sensitiveField)
+
+		// we check if the file exists, because if it doesn't, we assume it's a string and not a path
+		if *sensitiveField != "" && common.FileExists(filePath) {
+			contents, err := os.ReadFile(filePath)
+			if err != nil {
+				return errors.Wrapf(err, "Failed to read file %s", filePath)
+			}
+			*sensitiveField = strings.TrimSpace(string(contents))
+		}
+	}
+
+	return nil
 }

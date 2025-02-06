@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nuclio/nuclio/pkg/common"
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/dashboard"
 	"github.com/nuclio/nuclio/pkg/opa"
 	"github.com/nuclio/nuclio/pkg/platform"
@@ -61,13 +62,15 @@ func (tr *invocationResource) OnAfterInitialize() error {
 }
 
 func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, request *http.Request) {
+	trueString := "true"
 	ctx := request.Context()
-	path := request.Header.Get("x-nuclio-path")
-	functionName := request.Header.Get("x-nuclio-function-name")
-	invokeURL := request.Header.Get("x-nuclio-invoke-url")
+	path := request.Header.Get(headers.Path)
+	functionName := request.Header.Get(headers.FunctionName)
+	invokeURL := request.Header.Get(headers.InvokeURL)
+	sanitize := strings.ToLower(request.Header.Get(headers.SanitizeResponse)) == trueString
 
 	// get namespace from request or use the provided default
-	functionNamespace := tr.getNamespaceOrDefault(request.Header.Get("x-nuclio-function-namespace"))
+	functionNamespace := tr.getNamespaceOrDefault(request.Header.Get(headers.FunctionNamespace))
 
 	// if user prefixed path with "/", remove it
 	path = strings.TrimLeft(path, "/")
@@ -85,22 +88,25 @@ func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, 
 		return
 	}
 
-	invokeTimeout, err := tr.resolveInvokeTimeout(request.Header.Get("x-nuclio-invoke-timeout"))
+	invokeTimeout, err := tr.resolveInvokeTimeout(request.Header.Get(headers.InvokeTimeout))
 	if err != nil {
 		tr.writeErrorHeader(responseWriter, http.StatusBadRequest)
 		tr.writeErrorMessage(responseWriter, errors.RootCause(err).Error())
 	}
 
+	skipTLSVerification := strings.ToLower(request.Header.Get(headers.SkipTLSVerification)) == trueString
+
 	// resolve the function host
 	invocationResult, err := tr.getPlatform().CreateFunctionInvocation(ctx, &platform.CreateFunctionInvocationOptions{
-		Name:      functionName,
-		Namespace: functionNamespace,
-		Path:      path,
-		Method:    request.Method,
-		Headers:   request.Header,
-		Body:      requestBody,
-		URL:       invokeURL,
-		Timeout:   invokeTimeout,
+		Name:                functionName,
+		Namespace:           functionNamespace,
+		Path:                path,
+		Method:              request.Method,
+		Headers:             request.Header,
+		Body:                requestBody,
+		URL:                 invokeURL,
+		Timeout:             invokeTimeout,
+		SkipTLSVerification: skipTLSVerification,
 
 		// auth & permissions
 		AuthSession: tr.getCtxSession(ctx),
@@ -122,13 +128,18 @@ func (tr *invocationResource) handleRequest(responseWriter http.ResponseWriter, 
 	for headerName, headerValue := range invocationResult.Headers {
 
 		// don't send nuclio headers to the actual function
-		if !strings.HasPrefix(headerName, "x-nuclio") {
+		if !headers.IsNuclioHeader(headerName) {
 			responseWriter.Header().Set(headerName, headerValue[0])
 		}
 	}
 
+	body := invocationResult.Body
+	if sanitize {
+		body = common.SanitizeResponseData(invocationResult.Body, invocationResult.Headers)
+	}
+
 	responseWriter.WriteHeader(invocationResult.StatusCode)
-	responseWriter.Write(invocationResult.Body) // nolint: errcheck
+	responseWriter.Write(body) // nolint: errcheck
 }
 
 func (tr *invocationResource) writeErrorHeader(responseWriter http.ResponseWriter, statusCode int) {
@@ -137,7 +148,9 @@ func (tr *invocationResource) writeErrorHeader(responseWriter http.ResponseWrite
 }
 
 func (tr *invocationResource) writeErrorMessage(responseWriter io.Writer, message string) {
-	formattedMessage := fmt.Sprintf(`{"error": "%s"}`, message)
+
+	// replace " with ' so that the error message will be valid json
+	formattedMessage := fmt.Sprintf(`{"error": "%s"}`, strings.ReplaceAll(message, `"`, `'`))
 	responseWriter.Write([]byte(formattedMessage)) // nolint: errcheck
 }
 

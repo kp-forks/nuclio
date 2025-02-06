@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ func (sr *ShellRunner) RunWithPositionalAndNamedArguments(runOptions *RunOptions
 	encodedCommand := strings.Join(argsStringSlice, " ")
 
 	sr.logger.DebugWith("Running command", "encodedCommand", encodedCommand)
-	return sr.Run(runOptions, encodedCommand)
+	return sr.Run(runOptions, "%s", encodedCommand)
 }
 
 func (sr *ShellRunner) Run(runOptions *RunOptions, format string, vars ...interface{}) (RunResult, error) {

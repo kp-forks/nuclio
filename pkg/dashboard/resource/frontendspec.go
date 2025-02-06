@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -83,7 +83,8 @@ func (fsr *frontendSpecResource) getFrontendSpec(request *http.Request) (*restfu
 	defaultHTTPIngressHostTemplate := fsr.getDefaultHTTPIngressHostTemplate()
 	validFunctionPriorityClassNames := fsr.resolveValidFunctionPriorityClassNames()
 	defaultFunctionPodResources := fsr.resolveDefaultFunctionPodResources()
-	AutoScaleMetrics := fsr.resolveAutoScaleMetrics(inactivityWindowPresets)
+	autoScaleMetrics := fsr.resolveAutoScaleMetrics(inactivityWindowPresets)
+	logsScreenEnabled := fsr.isLogsScreenEnabled()
 
 	frontendSpec := map[string]restful.Attributes{
 		"frontendSpec": { // frontendSpec is the ID of this singleton resource
@@ -97,7 +98,9 @@ func (fsr *frontendSpecResource) getFrontendSpec(request *http.Request) (*restfu
 			"allowedAuthenticationModes":      allowedAuthenticationModes,
 			"validFunctionPriorityClassNames": validFunctionPriorityClassNames,
 			"defaultFunctionPodResources":     defaultFunctionPodResources,
-			"autoScaleMetrics":                AutoScaleMetrics,
+			"autoScaleMetrics":                autoScaleMetrics,
+			"disableDefaultHttpTrigger":       fsr.getPlatform().GetDisableDefaultHttpTrigger(),
+			"logsScreenEnabled":               logsScreenEnabled,
 		},
 	}
 
@@ -197,11 +200,11 @@ func (fsr *frontendSpecResource) resolveFunctionReadinessTimeoutSeconds() int {
 }
 
 func (fsr *frontendSpecResource) resolveDefaultFunctionNodeSelector() map[string]string {
-	var defaultNodeSelector map[string]string
+	var defaultFunctionNodeSelector map[string]string
 	if dashboardServer, ok := fsr.resource.GetServer().(*dashboard.Server); ok {
-		defaultNodeSelector = dashboardServer.GetPlatformConfiguration().Kube.DefaultFunctionNodeSelector
+		defaultFunctionNodeSelector = dashboardServer.GetPlatformConfiguration().Kube.DefaultFunctionNodeSelector
 	}
-	return defaultNodeSelector
+	return defaultFunctionNodeSelector
 }
 
 func (fsr *frontendSpecResource) resolveDefaultFunctionTolerations() []v1.Toleration {
@@ -280,6 +283,12 @@ func (fsr *frontendSpecResource) getDefaultHTTPIngressHostTemplate() string {
 
 	return common.GetEnvOrDefaultString(
 		"NUCLIO_DASHBOARD_HTTP_INGRESS_HOST_TEMPLATE", "")
+}
+
+func (fsr *frontendSpecResource) isLogsScreenEnabled() bool {
+	// This is a workaround until a BE log solution is implemented
+	return common.GetEnvOrDefaultBool(
+		"NUCLIO_DASHBOARD_LOGS_SCREEN_ENABLED", false)
 }
 
 // register the resource

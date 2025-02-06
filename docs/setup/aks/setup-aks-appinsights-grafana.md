@@ -55,7 +55,7 @@ kubectl create configmap platform-config  --namespace nuclio --from-file platfor
 ```
 
 At this stage, all metrics will be sent to application insights custom metrics table.
-To read more about platform configuration [click here](../../docs/tasks/configuring-a-platform.md)
+To read more about platform configuration [click here](../../tasks/configuring-a-platform.md)
 
 ## Configure Nuclio Logger to send logs to Application Insights
 
@@ -95,7 +95,7 @@ For example, to use the logger in your function, you can simply add the followin
 context.Logger.InfoWith("Some message", "arg1", 1, "arg2", 2)
 ```
 
-To read more about platform configuration [click here](../../docs/tasks/configuring-a-platform.md)
+To read more about platform configuration [click here](../../tasks/configuring-a-platform.md)
 
 ## Visualize your Application Insights using Grafana
 
@@ -193,15 +193,15 @@ Now, browse to http://127.0.0.1:3000/ and log in using the admin username and pa
 
 Verify that `Azure Monitor` exists in the plugins page.
 
-Configure a data source using the [plugin support page](https://github.com/grafana/azure-monitor-datasource#configure-the-data-source).
+Configure a data source using the [plugin support page](https://github.com/grafana/azure-monitor-datasource?tab=readme-ov-file#configure-the-data-source.
 
-Finally, see the provided sample Grafana JSON file (**[grafana-sample-dashboard.json](/docs/assets/grafana-sample-dashboard.json)**), which you can import from the Grafana dashboard: from the menu (plus icon - `+`) select **Create > Import** and upload the sample JSON file.
+You can import a [sample Grafana JSON file](https://raw.githubusercontent.com/nuclio/nuclio/development/docs/assets/grafana-sample-dashboard.json) from the Grafana dashboard: from the menu (plus icon - `+`) select **Create > Import** and upload the sample JSON file.
 
-![Grafana Dashboard](/docs/assets/images/grafana-dashboard.jpg?raw=true "Grafana Dashboard")
+![Grafana Dashboard](../../assets/images/grafana-dashboard.jpg)
 
 ### Further metric analysis using Application Insights
 
-Go to your Application Insights account. You'll be able to query your tables for information. The query language is using Kusto.
+Go to your Application Insights account. You'll be able to query your tables for information. The query language uses Kusto.
 
 Following are a few samples to quickly start querying:
 

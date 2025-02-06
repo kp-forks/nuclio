@@ -1,4 +1,4 @@
-# Copyright 2017 The Nuclio Authors.
+# Copyright 2023 The Nuclio Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,12 +61,11 @@ class Runtimes(object):
     dotnetcore = "dotnetcore"
     shell = "shell"
     ruby = "ruby"
-    python36 = "python:3.6"
-    python37 = "python:3.7"
-    python38 = "python:3.8"
     python39 = "python:3.9"
+    python310 = "python:3.10"
+    python311 = "python:3.11"
 
-    # NOTE: python is just an alias to python3.6
+    # NOTE: python is just an alias to python3.9
     python = "python"
 
     @staticmethod
@@ -74,9 +73,11 @@ class Runtimes(object):
         return {
             "empty": {
                 Runtimes.python: "empty:handler",
-                Runtimes.python36: "empty:handler",
                 Runtimes.python37: "empty:handler",
                 Runtimes.python38: "empty:handler",
+                Runtimes.python39: "empty:handler",
+                Runtimes.python310: "empty:handler",
+                Runtimes.python311: "empty:handler",
                 Runtimes.golang: "empty:Handler",
                 Runtimes.java: "EmptyHandler",
                 Runtimes.nodejs: "empty:handler",
@@ -91,9 +92,11 @@ class Runtimes(object):
         return {
             "empty": {
                 Runtimes.python: "empty.py",
-                Runtimes.python36: "empty.py",
                 Runtimes.python37: "empty.py",
                 Runtimes.python38: "empty.py",
+                Runtimes.python39: "empty.py",
+                Runtimes.python310: "empty.py",
+                Runtimes.python311: "empty.py",
                 Runtimes.golang: "empty.go",
                 Runtimes.java: "EmptyHandler.java",
                 Runtimes.nodejs: "empty.js",
@@ -107,9 +110,11 @@ class Runtimes(object):
     def all():
         return [
             Runtimes.golang,
-            Runtimes.python36,
             Runtimes.python37,
             Runtimes.python38,
+            Runtimes.python39,
+            Runtimes.python310,
+            Runtimes.python311,
             Runtimes.java,
             Runtimes.nodejs,
             Runtimes.dotnetcore,
@@ -128,38 +133,62 @@ class Vegeta(object):
         with open(self._workdir / body_size_filename, 'w') as f:
             f.truncate(body_size)
 
-        vegeta_cmd = "vegeta attack" \
-                     f" -name {function_name}" \
-                     " -duration 10s" \
-                     " -rate 0" \
-                     f" -body {body_size_filename}" \
-                     f" -connections {concurrent_requests}" \
-                     f" -workers {concurrent_requests}" \
-                     f" -max-workers {concurrent_requests}" \
-                     f" -output {self._resolve_bin_name(function_name, body_size)}"
-        self._logger.debug(f"Attacking command - {vegeta_cmd}")
+        vegeta_cmd = [
+            "vegeta",
+            "attack",
+            f"-name",
+            function_name,
+            "-duration",
+            "10s",
+            "-rate"
+            "0",
+            f"-body",
+            body_size_filename,
+            f"-connections",
+            concurrent_requests,
+            f"-workers",
+            concurrent_requests,
+            f"-max-workers",
+            concurrent_requests,
+            f"-output",
+            self._resolve_bin_name(function_name, body_size),
+        ]
+        self._logger.debug(f"Attacking command - {' '.join(vegeta_cmd)}")
         try:
-            subprocess.run(shlex.split(vegeta_cmd),
+            subprocess.run(vegeta_cmd,
                            cwd=self._workdir,
                            check=True,
                            stdout=subprocess.PIPE,
                            input=f"POST {function_url}".encode(),
                            timeout=30)
         finally:
-            os.remove(path=self._workdir / body_size_filename)
+            # sanitize path against path traversal
+            path = os.path.abspath(os.path.join(self._workdir, body_size_filename))
+            sanitized_path = os.path.relpath(os.path.join("/", path), "/")
+            os.remove(path=sanitized_path)
 
     def plot(self, function_names, body_size):
         encoded_bin_names = " ".join(f"{self._resolve_bin_name(function_name, body_size)}"
                                      for function_name in function_names)
-        plot_cmd = f"vegeta plot --title 'Nuclio functions benchmarking' {encoded_bin_names}"
+        plot_cmd = [
+            "vegeta",
+            "plot",
+            "--title",
+            "'Nuclio functions benchmarking'",
+            encoded_bin_names,
+        ]
         self._logger.debug(f"Plotting command - {plot_cmd}")
         with open(self._workdir / "plot.html", "w") as outfile:
-            subprocess.run(shlex.split(plot_cmd), cwd=self._workdir, check=True, stdout=outfile)
+            subprocess.run(plot_cmd, cwd=self._workdir, check=True, stdout=outfile)
 
     def report(self, function_name, body_size):
-        report_cmd = f"vegeta report {self._resolve_bin_name(function_name, body_size)}"
+        report_cmd = [
+            "vegeta",
+            "report",
+            self._resolve_bin_name(function_name, body_size),
+        ]
         self._logger.debug(f"Reporting command - {report_cmd}")
-        subprocess.run(shlex.split(report_cmd), cwd=self._workdir, check=True)
+        subprocess.run(report_cmd, cwd=self._workdir, check=True)
 
     def _resolve_bin_name(self, function_name, body_size):
         return f"{function_name}_{body_size}.bin"

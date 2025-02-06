@@ -77,7 +77,7 @@ The standard output sink currently does not support any specific attributes.
 
 - `attributes.instrumentationKey` - The instrumentation key from Azure
 - `attributes.maxBatchSize` - Max number of records to batch together before sending to Azure (defaults to 1024)
-- `attributes.maxBatchInterval` - Time to wait for maxBatchSize records (valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"), after which whatever's gathered will be sent towards Azure (defaults to 3s)
+- `attributes.maxBatchInterval` - Time to wait for maxBatchSize records (valid time units are `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`), after which whatever is gathered will be sent towards Azure (defaults to `3s`)
 
 <a id="metrics"></a>
 ### Metric sinks (`metrics`)
@@ -129,8 +129,8 @@ All metric sinks support the following fields:
 - `url` - The URL at which the push proxy resides
 - `attributes.jobName` - The Prometheus job name
 - `attributes.instanceName` - The Prometheus instance name
-- `attributes.interval` - A string holding the interval to which the push occurs such as "10s", "1h" or "2h45m".
-    Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
+- `attributes.interval` - A string holding the interval to which the push occurs such as `10s`, `1h` or `2h45m`.
+    Valid time units are `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`
 
 <a id="metric-sink-prometheusPull"></a>
 ##### Prometheus pull (`prometheusPull`)
@@ -142,10 +142,10 @@ All metric sinks support the following fields:
 <a id="metric-sink-appinsights"></a>
 ##### Azure Application Insights (`appinsights`)
 
-- `attributes.interval` - A string holding the interval to which the push occurs such as "10s", "1h" or "2h45m". Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
+- `attributes.interval` - A string holding the interval to which the push occurs such as `10s`, `1h` or `2h45m`. Valid time units are `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`
 - `attributes.instrumentationKey` - The instrumentation key from Azure
 - `attributes.maxBatchSize` - Max number of records to batch together before sending to Azure (defaults to 1024)
-- `attributes.maxBatchInterval` - Time to wait for maxBatchSize records (valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"), after which whatever's gathered will be sent towards Azure (defaults to 3s)
+- `attributes.maxBatchInterval` - Time to wait for maxBatchSize records (valid time units are `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`), after which whatever is gathered will be sent towards Azure (defaults to `3s`)
 
 <a id="webAdmin"></a>
 ### Webadmin (`webAdmin`)
@@ -190,7 +190,7 @@ For example, the following configuration implements Cron triggers as Kubernetes 
 cronTriggerCreationMode: "kube"
 ```
 
-For more information, see the [Cron-trigger reference](/docs/reference/triggers/cron.md).
+For more information, see the [Cron-trigger reference](../reference/triggers/cron.md).
 
 <a id="runtime"></a>
 ### Runtime (`runtime`)
@@ -202,4 +202,32 @@ For example to define custom PyPI repository, add the following section:
     python:
       buildArgs:
         PIP_INDEX_URL: "https://test.pypi.org/simple"
+```
+
+#### envFrom (`runtime.common.envFrom`)
+
+`envFrom` is a configuration of [`[]v1.envFromSource`](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.23/#envfromsource-v1-core) type 
+which enables the specification of secrets/configMaps for propagation to all functions. Platform values take lower precedence 
+compared to function config values, which can be specified in the function config spec under `envFrom` ([function configuration](../reference/function-configuration/function-configuration-reference.md) documentation).
+```yaml
+  envFrom:
+    - secretRef:
+        name: test-secret
+```
+
+<a id="sensitive-fields"></a>
+### Sensitive fields
+
+Nuclio resources (currently function configuration and api gateway configuration) may contain sensitive information such as passwords, tokens, etc.
+When the 'masking sensitive fields' feature is enabled, these fields get obfuscated, and their raw values are stored separately (in a Kubernetes secret). They are then populated internally when needed, during function deployment or api gateway creation.
+
+In api gateway config only `password` field is masked if 'masking sensitive fields' is enabled.
+For function config there are some config fields that are [masked by default](https://github.com/nuclio/nuclio/blob/development/pkg/platformconfig/types.go#L303-L340). You can add custom sensitive fields to mask by specifying the regex to the path in the function configuration.
+The masked fields are replaced with references (`$ref`) in the function configuration.
+Example:
+```yaml
+  sensitiveFields:
+    maskSensitiveFields: true
+    customSensitiveFields:
+    - "^/spec/triggers/.+/url$"
 ```

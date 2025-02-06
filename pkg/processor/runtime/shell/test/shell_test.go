@@ -1,7 +1,7 @@
 //go:build test_integration && test_local
 
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"path"
 	"testing"
 
+	"github.com/nuclio/nuclio/pkg/common/headers"
 	"github.com/nuclio/nuclio/pkg/processor/runtime/shell"
 	"github.com/nuclio/nuclio/pkg/processor/trigger/http/test/suite"
 
@@ -94,7 +95,7 @@ func (suite *TestSuite) TestOutputs() {
 		{
 			Name: "return overridden arguments",
 			RequestHeaders: map[string]interface{}{
-				"x-nuclio-arguments": "overridefirst overridesecond",
+				headers.Arguments: "overridefirst overridesecond",
 			},
 			RequestBody:                "return_arguments",
 			ExpectedResponseHeaders:    expectedResponseHeaders,

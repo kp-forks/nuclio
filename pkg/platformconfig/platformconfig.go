@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Nuclio Authors.
+Copyright 2023 The Nuclio Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ import (
 	"github.com/nuclio/errors"
 	"github.com/nuclio/logger"
 	"github.com/v3io/scaler/pkg/scalertypes"
-	autosv2 "k8s.io/api/autoscaling/v2beta1"
+	autosv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/api/core/v1"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
 )
@@ -60,6 +60,7 @@ type Config struct {
 	Opa                       opa.Config                       `json:"opa,omitempty"`
 	StreamMonitoring          StreamMonitoringConfig           `json:"streamMonitoring,omitempty"`
 	SensitiveFields           SensitiveFieldsConfig            `json:"sensitiveFields,omitempty"`
+	DisableDefaultHTTPTrigger bool                             `json:"disableDefaultHTTPTrigger,omitempty"`
 
 	ContainerBuilderConfiguration *containerimagebuilderpusher.ContainerBuilderConfiguration `json:"containerBuilderConfiguration,omitempty"`
 
@@ -106,10 +107,14 @@ func NewPlatformConfig(configurationPath string) (*Config, error) {
 		config.Logger.System = platformConfigurationReader.GetDefaultConfiguration().Logger.System
 	}
 
-	// default cron trigger creation mode to processor
-	// TODO: move under `config.Kube`
+	// resolve cron trigger creation mode according to platform
 	if config.CronTriggerCreationMode == "" {
-		config.CronTriggerCreationMode = ProcessorCronTriggerCreationMode
+		switch config.Kind {
+		case common.KubePlatformName:
+			config.CronTriggerCreationMode = KubeCronTriggerCreationMode
+		default:
+			config.CronTriggerCreationMode = ProcessorCronTriggerCreationMode
+		}
 	}
 
 	if config.Kube.DefaultServiceType == "" {
@@ -147,6 +152,10 @@ func NewPlatformConfig(configurationPath string) (*Config, error) {
 
 	if config.StreamMonitoring.V3ioRequestConcurrency == 0 {
 		config.StreamMonitoring.V3ioRequestConcurrency = DefaultV3ioRequestConcurrency
+	}
+
+	if config.Kube.DefaultHTTPIngressClassName == "" {
+		config.Kube.DefaultHTTPIngressClassName = DefaultHTTPIngressClassName
 	}
 
 	functionReadinessTimeout, err := time.ParseDuration(*config.FunctionReadinessTimeout)
@@ -306,52 +315,79 @@ func (c *Config) GetDefaultWindowSizePresets() []string {
 	}
 }
 
-// EnrichContainerResources enriches an object's requests and limits with the default
+// EnrichFunctionContainerResources enriches the function container's requests and limits with the default
 // resources defined in the platform config, only if they are not already configured
-func (c *Config) EnrichContainerResources(ctx context.Context,
+func (c *Config) EnrichFunctionContainerResources(ctx context.Context,
 	logger logger.Logger,
 	resources *v1.ResourceRequirements) {
+	c.enrichContainerResources(ctx,
+		logger,
+		resources,
+		c.Kube.DefaultFunctionPodResources,
+		true)
+}
 
-	defaultFunctionPodResources := c.Kube.DefaultFunctionPodResources
+// EnrichSupplementaryContainerResources enriches the sidecar/init container's requests and limits with the default
+// resources defined in the platform config, only if they are not already configured
+func (c *Config) EnrichSupplementaryContainerResources(ctx context.Context,
+	logger logger.Logger,
+	resources *v1.ResourceRequirements) {
+	c.enrichContainerResources(ctx,
+		logger,
+		resources,
+		c.Kube.DefaultSidecarResources,
+		false)
+}
+
+// enrichContainerResources enriches an object's requests and limits with the default
+// resources defined in the platform config, only if they are not already configured
+func (c *Config) enrichContainerResources(ctx context.Context,
+	logger logger.Logger,
+	resources *v1.ResourceRequirements,
+	defaultContainerResources PodResourceRequirements,
+	enrichLimits bool) {
 
 	logger.DebugWithCtx(ctx,
 		"Populating resources with default values",
-		"defaultFunctionPodResources", defaultFunctionPodResources)
+		"defaultContainerResources", defaultContainerResources)
 
 	if resources.Requests == nil {
 		resources.Requests = make(v1.ResourceList)
 	}
 
-	if _, exists := resources.Requests["cpu"]; !exists {
-		resources.Requests["cpu"] = common.ParseQuantityOrDefault(defaultFunctionPodResources.Requests.CPU,
+	if cpuRequest, exists := resources.Requests["cpu"]; !exists || cpuRequest.IsZero() {
+		resources.Requests["cpu"] = common.ParseQuantityOrDefault(defaultContainerResources.Requests.CPU,
 			"25m",
 			logger)
 	}
-	if _, exists := resources.Requests["memory"]; !exists {
-		resources.Requests["memory"] = common.ParseQuantityOrDefault(defaultFunctionPodResources.Requests.Memory,
+	if memoryRequest, exists := resources.Requests["memory"]; !exists || memoryRequest.IsZero() {
+		resources.Requests["memory"] = common.ParseQuantityOrDefault(defaultContainerResources.Requests.Memory,
 			"1Mi",
 			logger)
 	}
 
-	if resources.Limits == nil {
-		resources.Limits = make(v1.ResourceList)
-	}
-	if _, exists := resources.Limits["cpu"]; !exists {
-		cpuQuantity, err := apiresource.ParseQuantity(defaultFunctionPodResources.Limits.CPU)
-		if err == nil {
-			resources.Limits["cpu"] = cpuQuantity
+	// only set limits if this is not a sidecar
+	if enrichLimits {
+		if resources.Limits == nil {
+			resources.Limits = make(v1.ResourceList)
 		}
-	}
-	if _, exists := resources.Limits["memory"]; !exists {
-		memoryQuantity, err := apiresource.ParseQuantity(defaultFunctionPodResources.Limits.Memory)
-		if err == nil {
-			resources.Limits["memory"] = memoryQuantity
+		if cpuLimit, exists := resources.Limits["cpu"]; !exists || cpuLimit.IsZero() {
+			cpuQuantity, err := apiresource.ParseQuantity(defaultContainerResources.Limits.CPU)
+			if err == nil {
+				resources.Limits["cpu"] = cpuQuantity
+			}
+		}
+		if memoryLimit, exists := resources.Limits["memory"]; !exists || memoryLimit.IsZero() {
+			memoryQuantity, err := apiresource.ParseQuantity(defaultContainerResources.Limits.Memory)
+			if err == nil {
+				resources.Limits["memory"] = memoryQuantity
+			}
 		}
 	}
 
 	logger.DebugWithCtx(ctx,
 		"Populated resources with default values",
-		"resources", resources)
+		"resources", resources.String())
 }
 
 func (c *Config) getMetricSinks(metricSinkNames []string) (map[string]MetricSink, error) {
